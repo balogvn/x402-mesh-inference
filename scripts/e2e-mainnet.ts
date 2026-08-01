@@ -9,8 +9,10 @@
  *
  * Safety model, in order:
  *
- *  1. It refuses to do anything unless `X402_MAINNET_CONFIRM` is set to the exact sentence
- *     `I_UNDERSTAND_THIS_SPENDS_REAL_USDC`.
+ *  1. It refuses to spend unless `X402_MAINNET_CONFIRM` is set to the exact sentence
+ *     `I_UNDERSTAND_THIS_SPENDS_REAL_USDC`. `--dry-run` is exempt, because it never submits a
+ *     transaction and demanding a spend confirmation in order to *preview* a spend would make
+ *     the script's own "run --dry-run first" advice impossible to follow.
  *  2. It prints the exact atomic amount and the exact destination address before spending.
  *  3. It checks the payer account on chain first — funded, opted in, holding enough USDC —
  *     because a failed settlement still costs a fee and still wastes a round trip.
@@ -141,8 +143,15 @@ async function main(): Promise<number> {
   }
 
   // ---- Guard 1: the explicit, unambiguous confirmation ------------------------------------
+  //
+  // `--dry-run` is exempt. It performs every check and prints the exact spend without ever
+  // submitting a transaction, so requiring the spend confirmation to preview a spend is both
+  // pointless and self-contradictory — the refusal message itself tells the operator to
+  // "add --dry-run first", advice that could not be followed while this guard blocked it.
+  // The confirmation still gates every path that actually moves money.
+  const isDryRun = args.flags.has("dry-run");
   const confirm = process.env["X402_MAINNET_CONFIRM"]?.trim();
-  if (confirm !== CONFIRM_PHRASE) {
+  if (!isDryRun && confirm !== CONFIRM_PHRASE) {
     return refuse(
       confirm === undefined || confirm === ""
         ? "X402_MAINNET_CONFIRM is not set."
@@ -179,7 +188,7 @@ async function main(): Promise<number> {
     ]);
   }
 
-  const dryRun = args.flags.has("dry-run");
+  const dryRun = isDryRun;
   const model = args.options.get("model") ?? process.env["MESH_E2E_MODEL"] ?? "llama3.1:8b";
 
   // This script is MainNet by definition; an inherited MESH_NETWORK must not redirect it.
