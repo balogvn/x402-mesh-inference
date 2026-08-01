@@ -164,6 +164,10 @@ jobs:
           # chain, so it cannot be opted in to USDC. Enforcing the opt-in here would make every
           # node unroutable and there would be nothing to assert.
           MESH_REQUIRE_USDC_OPT_IN: "false"
+          # The simulated node is spawned on an ephemeral loopback port, which the SSRF
+          # guard blocks by default. Relaxing it here is what lets the harness register a
+          # node at all; the guard itself is covered by packages/gateway/test/ssrf.test.ts.
+          MESH_ALLOW_PRIVATE_NODE_ENDPOINTS: "true"
           LOG_LEVEL: info
         run: |
           npm run start --workspace @x402-mesh/gateway > gateway.log 2>&1 &
