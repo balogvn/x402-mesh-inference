@@ -231,6 +231,7 @@ export function renderLanding(config: GatewayConfig): string {
     comes back — no wallet required.
   </p>
   <button id="tryBtn" type="button">Send an unpaid request</button>
+  <a href="/chat" style="margin-left:10px">or open the chat client →</a>
   <div class="status" id="tryStatus"></div>
   <pre id="tryOut" hidden></pre>
 

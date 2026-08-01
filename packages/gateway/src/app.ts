@@ -2,6 +2,8 @@ import type { GatewayConfig } from "@x402-mesh/shared";
 import { SettlementError } from "@x402-mesh/shared";
 import type { x402ResourceServer } from "@x402/core/server";
 import { paymentMiddleware } from "@x402/express";
+import { createPaywall } from "@x402/paywall";
+import { avmPaywall } from "@x402/paywall/avm";
 import express from "express";
 import type { Express } from "express";
 import type { Logger } from "./logger.js";
@@ -20,6 +22,7 @@ import type {
 import { createChatRouter, NODE_ID_HEADER } from "./routes/chat.js";
 import { createDiscoveryRouter } from "./routes/discovery.js";
 import { createLandingRouter } from "./routes/landing.js";
+import { createChatUiRouter } from "./routes/chat-ui.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createNodeRouter } from "./routes/nodes.js";
 import { HttpNodeRouter } from "./services/router.js";
@@ -92,6 +95,26 @@ const DEFAULT_RATE_LIMIT_PER_SECOND = 2;
 /** Largest JSON body accepted; a chat request with 512 messages fits comfortably. */
 const MAX_BODY_SIZE = "1mb";
 
+/** Branding the Algorand paywall renders. */
+const PAYWALL_CONFIG = {
+  appName: "x402 Mesh Inference",
+  appLogo: "",
+} as const;
+
+/**
+ * Builds the browser paywall, memoised.
+ *
+ * `generateHtml` is pure, but constructing the provider pulls in the paywall bundle, so it is
+ * built once per process rather than per app. Only the AVM handler is registered — this
+ * gateway settles on Algorand and nothing else, and registering EVM/SVM handlers would let
+ * the paywall render a payment UI for a chain we cannot settle.
+ */
+let paywallProvider: ReturnType<ReturnType<typeof createPaywall>["build"]> | undefined;
+function browserPaywall(): NonNullable<Parameters<typeof paymentMiddleware>[3]> {
+  paywallProvider ??= createPaywall().withNetwork(avmPaywall).withConfig(PAYWALL_CONFIG).build();
+  return paywallProvider as NonNullable<Parameters<typeof paymentMiddleware>[3]>;
+}
+
 /** A chain reader that reports nothing as opted in. */
 const NO_CHAIN: ChainReaderPort = {
   isOptedIn: () => Promise.resolve(false),
@@ -129,6 +152,7 @@ export function createApp(deps: GatewayDeps): Express {
   // Free surface. Mounted before the paywall so no configuration mistake can start charging
   // for discovery or for a health check.
   app.use(createLandingRouter({ config }));
+  app.use(createChatUiRouter({ config }));
   app.use(createHealthRouter(buildHealthDeps(deps, logger, now)));
   app.use(
     createDiscoveryRouter({ config, logger, ...(deps.specDir ? { specDir: deps.specDir } : {}) }),
@@ -161,8 +185,12 @@ export function createApp(deps: GatewayDeps): Express {
       paymentMiddleware(
         routes,
         deps.resourceServer,
-        undefined,
-        undefined,
+        PAYWALL_CONFIG,
+        // Browser-facing payment UI. `paymentMiddleware` only reaches for this when the
+        // request advertises `Accept: text/html`; an agent sending `application/json` still
+        // gets the machine-readable 402 with the `payment-required` header, untouched. So
+        // this adds a human path without altering the protocol path at all.
+        browserPaywall(),
         deps.syncFacilitatorOnStart ?? true,
       ),
     );
