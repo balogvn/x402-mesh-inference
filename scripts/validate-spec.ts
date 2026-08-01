@@ -328,6 +328,55 @@ Exits 0 when spec/openapi.yaml, spec/well-known-x402.json and spec/llms.txt are 
 `);
 }
 
+/**
+ * Checks that each container image starts a long-running process rather than exiting.
+ *
+ * The node daemon's CLI is a commander program with no default action: invoking `cli.js`
+ * with no subcommand prints usage and exits 1. A Dockerfile whose CMD omitted `start`
+ * therefore produced a container that crash-looped while the gateway answered
+ * `503 no_capacity` for every paid request — a broken demo whose only symptom was a help
+ * screen in the container logs. Cheap to assert, expensive to rediscover.
+ *
+ * @param checklist - Collector for pass/fail lines.
+ */
+function validateDockerEntrypoints(checklist: Checklist): void {
+  const daemonPath = "docker/Dockerfile.node-daemon";
+  let daemon: string;
+  try {
+    daemon = readFileSync(daemonPath, "utf8");
+  } catch (e) {
+    checklist.fail("daemon dockerfile", errorMessage(e));
+    return;
+  }
+  const cmd = /^CMD\s+(\[.*\])\s*$/m.exec(daemon)?.[1];
+  if (cmd === undefined) {
+    checklist.fail("daemon dockerfile CMD", `no exec-form CMD found in ${daemonPath}`);
+    return;
+  }
+  const SUBCOMMANDS = ["start", "register", "doctor", "address"];
+  const named = SUBCOMMANDS.filter((c) => cmd.includes(`"${c}"`));
+  if (named.length === 0) {
+    checklist.fail(
+      "daemon dockerfile CMD",
+      `${cmd} names no subcommand — the container will print usage and exit 1`,
+    );
+  } else {
+    checklist.pass("daemon dockerfile CMD", `runs \`${named.join(", ")}\``);
+  }
+
+  const gatewayPath = "docker/Dockerfile.gateway";
+  try {
+    const gateway = readFileSync(gatewayPath, "utf8");
+    if (/^CMD\s+\[.*server\.js.*\]\s*$/m.test(gateway)) {
+      checklist.pass("gateway dockerfile CMD", "runs the server entrypoint");
+    } else {
+      checklist.fail("gateway dockerfile CMD", `${gatewayPath} does not start server.js`);
+    }
+  } catch (e) {
+    checklist.fail("gateway dockerfile", errorMessage(e));
+  }
+}
+
 function main(): number {
   const args = parseArgs(process.argv.slice(2));
   if (wantsHelp(args)) {
@@ -349,6 +398,7 @@ function main(): number {
   validateManifest(checklist, "spec/well-known-x402.json");
   validateLlmsTxt(checklist, "spec/llms.txt");
   validateEnvExample(checklist, ".env.example");
+  validateDockerEntrypoints(checklist);
   return checklist.summarize();
 }
 

@@ -88,7 +88,12 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD node -e "const u=new URL(process.env.MESH_NODE_ENDPOINT||'http://127.0.0.1:8500');u.hostname='127.0.0.1';u.protocol='http:';u.pathname='/healthz';fetch(u).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "--enable-source-maps", "packages/node-daemon/dist/cli.js"]
+# The `start` subcommand is required. `cli.js` on its own is a commander program with no
+# default action: it prints usage and exits 1, so the container would crash-loop and the
+# gateway would answer `503 no_capacity` for every paid request — with nothing in the logs
+# but a help screen. Override this to run `register`, `doctor` or `address` in a one-shot
+# container.
+CMD ["node", "--enable-source-maps", "packages/node-daemon/dist/cli.js", "start"]
 
 LABEL org.opencontainers.image.title="x402 Mesh Inference Node Daemon" \
       org.opencontainers.image.description="Registers a local LLM backend with an x402 mesh gateway and serves paid inference." \
