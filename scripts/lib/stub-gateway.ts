@@ -163,6 +163,24 @@ export async function startStubGateway(options: StubGatewayOptions): Promise<Stu
   }
 
   /**
+   * Headers accompanying a 402, matching what `@x402/express` emits on the real gateway.
+   *
+   * The real middleware puts the machine-readable challenge in a base64 `payment-required`
+   * header and leaves the body as a human-readable preview. A stub that only populated the
+   * body let the harness "pass" against a shape no real gateway produces — the same
+   * stub-kinder-than-reality trap that hid the `missing_facilitator` boot failure. Emitting
+   * the header keeps stub mode and live mode on one code path.
+   *
+   * @param body - The challenge object also being returned in the response body.
+   * @returns Extra response headers to merge into the 402.
+   */
+  function paymentRequiredHeaders(body: Record<string, unknown>): Record<string, string> {
+    return {
+      "payment-required": Buffer.from(JSON.stringify(body), "utf8").toString("base64"),
+    };
+  }
+
+  /**
    * Stands in for the facilitator's verify + settle.
    *
    * Checks the same invariants the real one does: the accepted requirements must be the ones
@@ -431,7 +449,8 @@ export async function startStubGateway(options: StubGatewayOptions): Promise<Stu
       const header = req.headers["x-payment"] ?? req.headers["payment-signature"];
       const headerValue = Array.isArray(header) ? header[0] : header;
       if (headerValue === undefined || headerValue.trim() === "") {
-        jsonResponse(res, 402, paymentRequiredBody("X-PAYMENT header is required"));
+        const challenge = paymentRequiredBody("X-PAYMENT header is required");
+        jsonResponse(res, 402, challenge, paymentRequiredHeaders(challenge));
         return;
       }
 
@@ -440,7 +459,8 @@ export async function startStubGateway(options: StubGatewayOptions): Promise<Stu
         settled = stubVerifyAndSettle(headerValue.trim());
       } catch (e) {
         if (e instanceof PaymentError) {
-          jsonResponse(res, 402, paymentRequiredBody(e.message));
+          const challenge = paymentRequiredBody(e.message);
+          jsonResponse(res, 402, challenge, paymentRequiredHeaders(challenge));
           return;
         }
         throw e;

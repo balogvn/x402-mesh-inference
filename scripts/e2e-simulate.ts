@@ -43,6 +43,7 @@ import {
 import * as avm from "@x402/avm";
 import { ExactAvmScheme as ClientExactAvmScheme } from "@x402/avm/exact/client";
 import { x402Client, x402HTTPClient } from "@x402/core/client";
+import { decodePaymentRequiredHeader } from "@x402/core/http";
 import type { Network, PaymentRequired } from "@x402/core/types";
 import {
   Checklist,
@@ -222,6 +223,25 @@ function realPayer(privateKeyB64: string, network: Network): Payer {
   };
 }
 
+/**
+ * Extracts the x402 challenge from a 402 response.
+ *
+ * The protocol puts it in the base64 `payment-required` header. Returns undefined rather
+ * than throwing so the caller can record a normal checklist failure.
+ *
+ * @param response - The 402 response.
+ * @returns The decoded challenge, or undefined if the header is absent or malformed.
+ */
+function readChallenge(response: Response): PaymentRequired | undefined {
+  const header = response.headers.get("payment-required");
+  if (header === null) return undefined;
+  try {
+    return decodePaymentRequiredHeader(header);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Issues the unpaid request and validates the 402 challenge it comes back with. */
 async function assertChallenge(
   checklist: Checklist,
@@ -240,7 +260,15 @@ async function assertChallenge(
     return undefined;
   }
 
-  const challenge = (await response.json()) as PaymentRequired;
+  // x402 v2 carries the machine-readable challenge in the base64 `payment-required` HEADER.
+  // The JSON body is the human/agent-readable preview and has no `accepts[]`. Reading the
+  // body and casting it to PaymentRequired (as this harness used to) type-checks fine and
+  // then reports "accepts[] empty" against a perfectly healthy gateway.
+  const challenge = readChallenge(response);
+  if (challenge === undefined) {
+    checklist.fail("challenge payment-required header", "missing or undecodable");
+    return undefined;
+  }
   expect(checklist, challenge.x402Version === 2, "challenge is x402 v2");
 
   const requirements = challenge.accepts?.[0];
