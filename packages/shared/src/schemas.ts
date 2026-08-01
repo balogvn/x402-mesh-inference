@@ -115,13 +115,21 @@ export const NodeCapabilitySchema = z
   })
   .strict();
 
+/** Operator-chosen node id: an identifier, not free text. Shared by registration and heartbeat. */
+export const NodeIdSchema = z
+  .string()
+  .min(1, "nodeId is required")
+  .max(128, "nodeId is too long")
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, "nodeId contains illegal characters");
+
+/** Single-use random hex. Shared so registration and heartbeat cannot drift apart. */
+export const NonceSchema = z
+  .string()
+  .regex(/^[0-9a-fA-F]{16,128}$/, "nonce must be 16-128 hex characters");
+
 export const NodeRegistrationSchema = z
   .object({
-    nodeId: z
-      .string()
-      .min(1, "nodeId is required")
-      .max(128, "nodeId is too long")
-      .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, "nodeId contains illegal characters"),
+    nodeId: NodeIdSchema,
     operatorAddress: AlgorandAddressSchema,
     endpoint: EndpointUrlSchema,
     capabilities: z
@@ -139,13 +147,44 @@ export const NodeRegistrationSchema = z
       .int("timestamp must be integer milliseconds")
       .positive("timestamp must be positive")
       .max(Number.MAX_SAFE_INTEGER),
-    nonce: z.string().regex(/^[0-9a-fA-F]{16,128}$/, "nonce must be 16-128 hex characters"),
+    nonce: NonceSchema,
   })
   .strict();
 
 export const SignedNodeRegistrationSchema = z
   .object({
     registration: NodeRegistrationSchema,
+    signature: z
+      .string()
+      .refine((v) => isBase64OfLength(v, 64), "signature must be 64 base64-encoded bytes"),
+    publicKey: z
+      .string()
+      .refine((v) => isBase64OfLength(v, 32), "publicKey must be 32 base64-encoded bytes"),
+  })
+  .strict();
+
+/**
+ * The seven signed heartbeat fields.
+ *
+ * `.strict()` matters here: the signature covers exactly this projection, so an unknown
+ * property is either a client bug or an attempt to smuggle unsigned data past verification.
+ * Rejecting is safer than ignoring.
+ */
+export const NodeHeartbeatSchema = z
+  .object({
+    nodeId: NodeIdSchema,
+    healthy: z.boolean(),
+    inFlight: z.number().int().nonnegative().max(1_000_000),
+    maxConcurrency: z.number().int().positive().max(4096),
+    version: z.string().min(1).max(64),
+    timestamp: z.number().int().positive(),
+    nonce: NonceSchema,
+  })
+  .strict();
+
+export const SignedNodeHeartbeatSchema = z
+  .object({
+    heartbeat: NodeHeartbeatSchema,
     signature: z
       .string()
       .refine((v) => isBase64OfLength(v, 64), "signature must be 64 base64-encoded bytes"),

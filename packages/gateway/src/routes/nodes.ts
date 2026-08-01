@@ -4,14 +4,17 @@ import type {
   NodeHealth,
   NodeRecord,
   NodeRegistration,
+  SignedNodeHeartbeat,
   SignedNodeRegistration,
 } from "@x402-mesh/shared";
 import {
   assertFreshTimestamp,
   assertRoutableEndpoint,
   AuthError,
+  canonicalHeartbeatBytes,
   canonicalRegistrationBytes,
   parseOrThrow,
+  SignedNodeHeartbeatSchema,
   SignedNodeRegistrationSchema,
   usdcAssetId,
   ValidationError,
@@ -19,7 +22,6 @@ import {
 import { decodeAddress } from "@algorandfoundation/algokit-utils";
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { z } from "zod";
 import type { Logger } from "../logger.js";
 import { getRequestId } from "../middleware/requestId.js";
 import type { ChainReaderPort, Clock, NodeStorePort } from "../ports.js";
@@ -49,14 +51,6 @@ const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 /** Bytes in a raw Ed25519 public key. */
 const ED25519_PUBLIC_KEY_BYTES = 32;
 
-/** Optional heartbeat body; a bare heartbeat with no body is valid. */
-const HeartbeatBodySchema = z
-  .object({
-    /** Node's own view of its in-flight count, used to correct drift. */
-    inFlight: z.number().int().nonnegative().max(4096).optional(),
-  })
-  .strict();
-
 /** Collaborators the node routes need. */
 export interface NodeRouteDeps {
   config: GatewayConfig;
@@ -83,7 +77,7 @@ export function createNodeRouter(deps: NodeRouteDeps): Router {
   });
 
   router.post("/v1/nodes/:id/heartbeat", (req, res, next) => {
-    handleHeartbeat(deps, now, req, res).catch(next);
+    handleHeartbeat(deps, nonces, now, req, res).catch(next);
   });
 
   router.get("/v1/nodes", (req, res, next) => {
@@ -195,8 +189,65 @@ async function handleRegister(
   });
 }
 
+/**
+ * Verifies a heartbeat's Ed25519 signature against the operator address recorded at
+ * registration.
+ *
+ * `operatorAddress` is deliberately a parameter rather than a field of the signed payload:
+ * the caller must pass the address from the gateway's own stored `NodeRecord`. A heartbeat
+ * that carried its own address would let anyone sign with a fresh key, name any node, and be
+ * believed — which is exactly the hole this closes.
+ *
+ * @param signed - The parsed heartbeat envelope.
+ * @param operatorAddress - Address from the stored registration, never from the request.
+ * @throws {AuthError} If the key does not match the address or the signature does not verify.
+ */
+export function verifyHeartbeatSignature(
+  signed: SignedNodeHeartbeat,
+  operatorAddress: string,
+): void {
+  let addressKey: Uint8Array;
+  try {
+    addressKey = decodeAddress(operatorAddress).publicKey;
+  } catch {
+    throw new AuthError("stored operator address is not a valid Algorand address", {
+      nodeId: signed.heartbeat.nodeId,
+    });
+  }
+  if (addressKey.length !== ED25519_PUBLIC_KEY_BYTES) {
+    throw new AuthError("operator address did not yield a 32-byte Ed25519 public key");
+  }
+
+  if (!Buffer.from(addressKey).equals(Buffer.from(signed.publicKey, "base64"))) {
+    throw new AuthError("heartbeat public key does not match the registered operator", {
+      nodeId: signed.heartbeat.nodeId,
+    });
+  }
+
+  const spki = Buffer.concat([ED25519_SPKI_PREFIX, Buffer.from(addressKey)]);
+  let keyObject;
+  try {
+    keyObject = createPublicKey({ key: spki, format: "der", type: "spki" });
+  } catch {
+    throw new AuthError("operator public key could not be imported for verification");
+  }
+
+  const ok = verifySignature(
+    null,
+    canonicalHeartbeatBytes(signed.heartbeat),
+    keyObject,
+    Buffer.from(signed.signature, "base64"),
+  );
+  if (!ok) {
+    throw new AuthError("heartbeat signature verification failed", {
+      nodeId: signed.heartbeat.nodeId,
+    });
+  }
+}
+
 async function handleHeartbeat(
   deps: NodeRouteDeps,
+  nonces: NonceCache,
   now: Clock,
   req: Request,
   res: Response,
@@ -208,7 +259,39 @@ async function handleHeartbeat(
   if (nodeId === undefined || nodeId.length === 0) {
     throw new ValidationError("node id is required");
   }
-  parseOrThrow(HeartbeatBodySchema, req.body ?? {}, "heartbeat");
+  const signed = parseOrThrow(
+    SignedNodeHeartbeatSchema,
+    req.body ?? {},
+    "heartbeat",
+  ) as SignedNodeHeartbeat;
+  const heartbeat = signed.heartbeat;
+
+  // The node must already exist, and we read its operator address from OUR record rather
+  // than from the request. Trusting a request-supplied address would make the signature
+  // meaningless: an attacker would simply sign with their own key and name it.
+  const existing = await deps.store.get(nodeId);
+  if (existing === undefined) {
+    throw new ValidationError("unknown node; register before sending heartbeats", { nodeId });
+  }
+
+  // The signed nodeId must match the path, or a heartbeat signed for node A could be
+  // replayed against node B by the same operator.
+  if (heartbeat.nodeId !== nodeId) {
+    throw new AuthError("heartbeat nodeId does not match the path", {
+      nodeId,
+      signedNodeId: heartbeat.nodeId,
+    });
+  }
+
+  // Freshness bounds how long a captured heartbeat stays usable at all...
+  assertFreshTimestamp(heartbeat.timestamp, now());
+  // ...and the nonce makes it single-use inside that window. Without both, one captured
+  // beat would keep a dead node marked healthy indefinitely.
+  if (!nonces.claim(heartbeat.nonce)) {
+    throw new ValidationError("heartbeat nonce has already been used", { nodeId });
+  }
+
+  verifyHeartbeatSignature(signed, existing.registration.operatorAddress);
 
   const updated = await deps.store.heartbeat(nodeId, now());
   if (updated === undefined) {

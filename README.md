@@ -751,6 +751,23 @@ operators, and it is defended in five ordered layers:
 Plus a **network agreement** check (a node settling on a different chain can never be paid) and
 the **on-chain USDC opt-in** check described above.
 
+**Authenticated heartbeats.** Every heartbeat carries the same Ed25519 envelope as a
+registration, signed over the domain `x402-mesh/node-heartbeat/v1` — a separate domain from
+registration, so a captured registration signature can never be replayed as a heartbeat. The
+gateway verifies four things before touching liveness:
+
+- the signing key matches the operator address **recorded at registration**, read from the
+  gateway's own store and never from the request (a request-supplied address would let anyone
+  sign with a fresh key and be believed);
+- the signed `nodeId` matches the path, so a beat signed for one node cannot be replayed
+  against another;
+- the timestamp is inside the skew window, and the nonce is single-use.
+
+This matters because health is what the selector uses to decide where paid traffic goes, and
+node ids are public via `GET /v1/nodes`. An unauthenticated heartbeat endpoint would let
+anyone keep a dead — or hostile — node marked healthy, which is unauthenticated input driving
+an economic decision. The daemon has always signed its beats; the gateway now verifies them.
+
 **SSRF protection on operator endpoints.** `MESH_NODE_ENDPOINT` is an operator-supplied URL that
 the gateway will fetch, and registration is open to anyone who can generate an Algorand keypair —
 so this URL is attacker-controlled input. An audit of this repo confirmed the vector empirically:

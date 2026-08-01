@@ -11,6 +11,7 @@ import { verifyRegistrationSignature } from "../src/routes/nodes.js";
 import {
   makeConfig,
   makeOperator,
+  makeSignedHeartbeat,
   makeSignedRegistration,
   StubChain,
   StubSelector,
@@ -263,7 +264,9 @@ describe("POST /v1/nodes/:id/heartbeat", () => {
 
     const before = store.get("node-alpha")?.health.lastSeenAt ?? 0;
     await new Promise((resolve) => setTimeout(resolve, 5));
-    const response = await request(app).post("/v1/nodes/node-alpha/heartbeat").send({});
+    const response = await request(app)
+      .post("/v1/nodes/node-alpha/heartbeat")
+      .send(makeSignedHeartbeat(operator));
 
     expect(response.status).toBe(200);
     expect(response.body.healthy).toBe(true);
@@ -272,8 +275,11 @@ describe("POST /v1/nodes/:id/heartbeat", () => {
 
   it("rejects a heartbeat from an unregistered node", async () => {
     const { app } = buildApp();
+    const operator = makeOperator();
 
-    const response = await request(app).post("/v1/nodes/ghost/heartbeat").send({});
+    const response = await request(app)
+      .post("/v1/nodes/ghost/heartbeat")
+      .send(makeSignedHeartbeat(operator, { nodeId: "ghost" }));
 
     expect(response.status).toBe(400);
     expect(response.body.error.message).toContain("register before sending heartbeats");

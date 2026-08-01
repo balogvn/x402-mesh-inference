@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { ValidationError } from "./errors.js";
 import { normalizeNetwork } from "./networks.js";
-import type { NodeCapability, NodeRegistration } from "./types.js";
+import type { NodeCapability, NodeHeartbeat, NodeRegistration } from "./types.js";
 
 /**
  * Domain separator prefixed to every registration signing payload.
@@ -98,6 +98,56 @@ export function canonicalRegistrationBytes(r: NodeRegistration): Uint8Array {
     nonce: r.nonce,
   };
   return new TextEncoder().encode(`${REGISTRATION_DOMAIN}\n${canonicalJson(projection)}`);
+}
+
+/**
+ * Builds the exact bytes a signer covers: a domain separator, a newline, then canonical JSON.
+ *
+ * The domain separator is what stops a signature minted for one message kind from being
+ * replayed as another — a captured registration signature must never verify as a heartbeat,
+ * or an attacker could re-use one legitimate registration to keep a node "alive" forever.
+ *
+ * Exported so every message kind in the mesh shares ONE canonical-JSON implementation. A
+ * second, independently written serializer only has to disagree on one edge case (key
+ * ordering, a `-0`, a non-finite number) for signatures to stop verifying in production
+ * while every unit test still passes.
+ *
+ * @param domain - Stable domain-separation string, versioned.
+ * @param payload - The projection to serialize.
+ * @returns UTF-8 bytes to sign or verify.
+ */
+export function domainSeparatedBytes(domain: string, payload: unknown): Uint8Array {
+  return new TextEncoder().encode(`${domain}\n${canonicalJson(payload)}`);
+}
+
+/**
+ * Domain separator for heartbeats. Distinct from {@link REGISTRATION_DOMAIN} on purpose.
+ */
+export const HEARTBEAT_DOMAIN = "x402-mesh/node-heartbeat/v1";
+
+/**
+ * Produces the exact byte sequence signed for a heartbeat.
+ *
+ * ```text
+ * bytes = UTF-8( "x402-mesh/node-heartbeat/v1" + "\n" + canonicalJson(projection) )
+ * ```
+ *
+ * The projection contains exactly the seven {@link NodeHeartbeat} fields, so a property added
+ * in transit cannot change what was signed.
+ *
+ * @param h - The heartbeat to serialize.
+ * @returns UTF-8 bytes covered by the signature.
+ */
+export function canonicalHeartbeatBytes(h: NodeHeartbeat): Uint8Array {
+  return domainSeparatedBytes(HEARTBEAT_DOMAIN, {
+    nodeId: h.nodeId,
+    healthy: h.healthy,
+    inFlight: h.inFlight,
+    maxConcurrency: h.maxConcurrency,
+    version: h.version,
+    timestamp: h.timestamp,
+    nonce: h.nonce,
+  });
 }
 
 /** Generates a 128-bit cryptographically random nonce as 32 lowercase hex characters. */

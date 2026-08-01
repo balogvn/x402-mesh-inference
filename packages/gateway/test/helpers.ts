@@ -4,13 +4,16 @@ import { encodeAddress } from "@algorandfoundation/algokit-utils";
 import type {
   GatewayConfig,
   NodeRecord,
+  NodeHeartbeat,
   NodeRegistration,
   SettlementRecord,
+  SignedNodeHeartbeat,
   SignedNodeRegistration,
 } from "@x402-mesh/shared";
 import {
   ALGORAND_TESTNET,
   facilitatorNetwork,
+  canonicalHeartbeatBytes,
   canonicalRegistrationBytes,
   NoCapacityError,
   registrationNonce,
@@ -369,4 +372,42 @@ export function sseResponse(frames: string[], init: ResponseInit = {}): Response
     headers: { "content-type": "text/event-stream" },
     ...init,
   });
+}
+
+/**
+ * Builds a signed heartbeat envelope for `operator`.
+ *
+ * The gateway verifies this against the operator address stored at registration, so tests
+ * that want a heartbeat accepted must sign with the same operator they registered with.
+ *
+ * @param operator - The identity signing the beat.
+ * @param overrides - Field overrides, e.g. a stale `timestamp` or a mismatched `nodeId`.
+ * @param now - Clock for the signing timestamp.
+ * @returns A signed heartbeat ready to POST.
+ */
+export function makeSignedHeartbeat(
+  operator: TestOperator,
+  overrides: Partial<NodeHeartbeat> = {},
+  now = Date.now(),
+): SignedNodeHeartbeat {
+  const heartbeat: NodeHeartbeat = {
+    nodeId: "node-alpha",
+    healthy: true,
+    inFlight: 0,
+    maxConcurrency: 8,
+    version: "0.1.0",
+    timestamp: now,
+    nonce: registrationNonce(),
+    ...overrides,
+  };
+  const signature = signEd25519(
+    null,
+    Buffer.from(canonicalHeartbeatBytes(heartbeat)),
+    operator.privateKey,
+  );
+  return {
+    heartbeat,
+    signature: signature.toString("base64"),
+    publicKey: operator.publicKeyB64,
+  };
 }

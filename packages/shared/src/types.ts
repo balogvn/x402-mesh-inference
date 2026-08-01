@@ -50,6 +50,38 @@ export interface SignedNodeRegistration {
   publicKey: string;
 }
 
+/**
+ * Liveness and load report a node sends the gateway on every interval.
+ *
+ * Carries `timestamp` and `nonce` for the same reason a registration does: the gateway treats
+ * a heartbeat as proof the operator is alive, so a captured one must not stay replayable.
+ */
+export interface NodeHeartbeat {
+  /** Node id the gateway registered this daemon under. */
+  nodeId: string;
+  /** False when the local inference backend is not answering. */
+  healthy: boolean;
+  /** Requests currently executing on this node. */
+  inFlight: number;
+  /** Configured concurrency ceiling, so the gateway can compute headroom. */
+  maxConcurrency: number;
+  /** Daemon version string. */
+  version: string;
+  /** Unix epoch milliseconds at signing time. */
+  timestamp: number;
+  /** Single-use random hex, 128 bits. */
+  nonce: string;
+}
+
+/** A heartbeat plus the Ed25519 proof that the operator key produced it. */
+export interface SignedNodeHeartbeat {
+  heartbeat: NodeHeartbeat;
+  /** Base64 Ed25519 signature over `canonicalHeartbeatBytes`. */
+  signature: string;
+  /** Base64 Ed25519 public key; must match the node's registered operator address. */
+  publicKey: string;
+}
+
 /** Rolling liveness and quality signal the registry maintains per node. */
 export interface NodeHealth {
   nodeId: string;

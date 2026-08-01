@@ -1,6 +1,11 @@
-import { UpstreamError, registrationNonce } from "@x402-mesh/shared";
+import {
+  HEARTBEAT_DOMAIN,
+  UpstreamError,
+  canonicalHeartbeatBytes,
+  registrationNonce,
+} from "@x402-mesh/shared";
+import type { NodeHeartbeat, SignedNodeHeartbeat } from "@x402-mesh/shared";
 import type { DaemonConfig } from "@x402-mesh/shared";
-import { domainSeparatedBytes } from "./canonical.js";
 import {
   DEFAULT_CONTROL_TIMEOUT_MS,
   baseHeaders,
@@ -15,63 +20,14 @@ import type { OperatorKey } from "./keys.js";
 import { DAEMON_VERSION } from "./version.js";
 
 /**
- * Domain separator prefixed to every heartbeat signing payload.
- *
- * Distinct from the registration domain so a captured heartbeat signature can never be
- * replayed as a registration (or the reverse). Bump the version suffix if the payload layout
- * changes.
+ * The heartbeat signing scheme now lives in `@x402-mesh/shared`, because the gateway has to
+ * verify exactly what this daemon signs. It was defined here first, alongside a second copy
+ * of the canonical-JSON serializer — and a signing scheme implemented twice is a scheme that
+ * only has to disagree once to break authentication in production while every test passes.
+ * Re-exported so existing importers keep working.
  */
-export const HEARTBEAT_DOMAIN = "x402-mesh/node-heartbeat/v1";
-
-/** Liveness and load report a node sends the gateway on every interval. */
-export interface NodeHeartbeat {
-  /** Node id the gateway registered this daemon under. */
-  nodeId: string;
-  /** False when the local inference backend is not answering. */
-  healthy: boolean;
-  /** Requests currently executing on this node. */
-  inFlight: number;
-  /** Configured concurrency ceiling, so the gateway can compute headroom. */
-  maxConcurrency: number;
-  /** Daemon version string. */
-  version: string;
-  /** Unix epoch milliseconds at signing time. */
-  timestamp: number;
-  /** Single-use random hex, 128 bits. */
-  nonce: string;
-}
-
-/** A heartbeat plus the Ed25519 proof that the operator key produced it. */
-export interface SignedNodeHeartbeat {
-  heartbeat: NodeHeartbeat;
-  /** Base64 Ed25519 signature over {@link canonicalHeartbeatBytes}. */
-  signature: string;
-  /** Base64 Ed25519 public key; must correspond to the node's registered operator address. */
-  publicKey: string;
-}
-
-/**
- * Produces the exact byte sequence signed for a heartbeat.
- *
- * ```text
- * bytes = UTF-8( "x402-mesh/node-heartbeat/v1" + "\n" + canonicalJson(projection) )
- * ```
- *
- * The projection contains exactly the seven {@link NodeHeartbeat} fields, so extra properties
- * added in transit cannot change what was signed. Key order is irrelevant: `canonicalJson`
- * sorts.
- */
-export function canonicalHeartbeatBytes(h: NodeHeartbeat): Uint8Array {
-  return domainSeparatedBytes(HEARTBEAT_DOMAIN, {
-    nodeId: h.nodeId,
-    healthy: h.healthy,
-    inFlight: h.inFlight,
-    maxConcurrency: h.maxConcurrency,
-    version: h.version,
-    timestamp: h.timestamp,
-    nonce: h.nonce,
-  });
-}
+export { HEARTBEAT_DOMAIN, canonicalHeartbeatBytes };
+export type { NodeHeartbeat, SignedNodeHeartbeat };
 
 /** Signs a heartbeat with the operator key. */
 export function signHeartbeat(heartbeat: NodeHeartbeat, key: OperatorKey): SignedNodeHeartbeat {

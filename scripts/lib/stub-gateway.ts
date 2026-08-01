@@ -25,15 +25,18 @@ import {
   assertFreshTimestamp,
   assertSplitInvariant,
   atomicToWire,
+  canonicalHeartbeatBytes,
   canonicalRegistrationBytes,
   computeSplit,
   normalizeNetwork,
   parseOrThrow,
+  SignedNodeHeartbeatSchema,
   SignedNodeRegistrationSchema,
   toErrorResponse,
   usdcAssetId,
   usdcToAtomic,
   type NodeRecord,
+  type SignedNodeHeartbeat,
   type SettlementRecord,
 } from "@x402-mesh/shared";
 import type { Network } from "@x402/core/types";
@@ -417,7 +420,38 @@ export async function startStubGateway(options: StubGatewayOptions): Promise<Stu
       const nodeId = decodeURIComponent(heartbeat[1] ?? "");
       const record = nodes.get(nodeId);
       if (record === undefined) throw new ValidationError("unknown nodeId", { nodeId });
-      await readJsonBody(req);
+      // Verify exactly as the real gateway does. A stub that waved heartbeats through would
+      // be kinder than production — the failure mode that let three earlier bugs escape.
+      const signed = parseOrThrow(
+        SignedNodeHeartbeatSchema,
+        await readJsonBody(req),
+        "heartbeat",
+      ) as SignedNodeHeartbeat;
+      if (signed.heartbeat.nodeId !== nodeId) {
+        throw new ValidationError("heartbeat nodeId does not match the path", { nodeId });
+      }
+      assertFreshTimestamp(signed.heartbeat.timestamp);
+      if (seenNonces.has(signed.heartbeat.nonce)) {
+        throw new ValidationError("heartbeat nonce has already been used", { nodeId });
+      }
+      seenNonces.add(signed.heartbeat.nonce);
+      if (
+        addressFromPublicKey(Buffer.from(signed.publicKey, "base64")) !==
+        record.registration.operatorAddress
+      ) {
+        throw new ValidationError("heartbeat key does not match the registered operator", {
+          nodeId,
+        });
+      }
+      if (
+        !verifyBytes(
+          Buffer.from(canonicalHeartbeatBytes(signed.heartbeat)),
+          Buffer.from(signed.signature, "base64"),
+          Buffer.from(signed.publicKey, "base64"),
+        )
+      ) {
+        throw new ValidationError("heartbeat signature verification failed", { nodeId });
+      }
       record.health.lastSeenAt = Date.now();
       record.health.healthy = true;
       jsonResponse(res, 200, record.health);
