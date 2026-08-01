@@ -107,14 +107,28 @@ export function rateLimit(options: RateLimitOptions): RequestHandler {
 }
 
 /**
- * Derives the bucket key: `payer:<algorand address>` when the request carries a decodable
- * x402 payment header, otherwise `ip:<remote address>`.
+ * Derives the bucket key from the remote address.
  *
- * Exported for tests, which assert the fallback ordering directly.
+ * This used to prefer `payer:<algorand address>` read from the x402 payment header, on the
+ * reasoning that the value was "used for bucketing only, never for authorization". That
+ * reasoning was wrong: bucketing *is* a security decision, and the header is attacker
+ * controlled because it is read **before** the facilitator verifies anything. The sender of
+ * an *unsigned* transaction decodes perfectly well, so it cost nothing to forge. Two
+ * exploits followed, both demonstrated:
+ *
+ *   - **Targeted denial of service.** Name a paying customer's address in the header and
+ *     drain their bucket; their own correctly-signed requests then get 429 indefinitely.
+ *   - **Total bypass.** Rotate a fresh random sender per request for an unlimited supply of
+ *     full-capacity buckets, leaving the paid route with no effective limit at all.
+ *
+ * Keying on the socket peer removes both: an attacker cannot choose someone else's bucket,
+ * and cannot mint new ones without new addresses. The cost is that payers sharing a NAT
+ * share a bucket, which is the correct trade against an unbounded bypass — tune capacity
+ * rather than reintroducing an unauthenticated key.
+ *
+ * Exported for tests.
  */
 export function rateLimitKey(req: Request): string {
-  const payer = payerFromRequest(req);
-  if (payer !== undefined) return `payer:${payer}`;
   return `ip:${req.ip ?? req.socket?.remoteAddress ?? "unknown"}`;
 }
 

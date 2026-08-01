@@ -109,10 +109,17 @@ export function createApp(deps: GatewayDeps): Express {
   const config = deps.config;
 
   const app = express();
-  // Trust the proxy hop count from the environment rather than blanket-trusting every
-  // forwarded header: `trust proxy: true` would let any client spoof `req.ip` and so pick
-  // its own rate-limit bucket.
-  app.set("trust proxy", 1);
+  // How many reverse-proxy hops to trust when resolving `req.ip`.
+  //
+  // This was hardcoded to 1, which is only correct when the gateway genuinely sits behind
+  // exactly one proxy. On a directly exposed gateway it means any client can set
+  // `X-Forwarded-For` to a random value per request, get a fresh rate-limit bucket every
+  // time, and bypass the limiter entirely — demonstrated against this very middleware.
+  //
+  // Zero (the default) trusts nothing and uses the real socket peer, which is always safe.
+  // Operators behind N proxies set MESH_TRUST_PROXY_HOPS=N; getting that number right is a
+  // deployment fact we cannot infer, and guessing it wrong fails open.
+  app.set("trust proxy", config.trustProxyHops);
   app.disable("x-powered-by");
 
   app.use(express.json({ limit: MAX_BODY_SIZE }));
@@ -234,6 +241,38 @@ export function attachSettlementHook(
       }
 
       const result = context.result;
+
+      // `onAfterSettle` fires for BOTH outcomes. The facilitator answers HTTP 200 with
+      // `success: false` when the atomic group failed on-chain (confirmation timeout, an
+      // underflowed asset balance, a rejected transfer), so "after settle" does NOT mean
+      // "settled". Paying the operator on that path sends 1700 atomic USDC out of the
+      // gateway's own float against money that never arrived — an unbounded drain, one
+      // payout per failed settlement, and trivially forced by a payer who lets their
+      // payment fail. Gate on the outcome, not on the hook firing.
+      if (result.success !== true) {
+        logger.error(
+          {
+            requestId: id,
+            nodeId: headers[NODE_ID_HEADER] ?? null,
+            errorReason: result.errorReason ?? null,
+            errorMessage: result.errorMessage ?? null,
+          },
+          "facilitator reported settlement failure; operator payout skipped",
+        );
+        return;
+      }
+
+      // A genuinely settled payment carries the on-chain transaction id. An empty one means
+      // we cannot evidence that the inbound leg landed, so there is nothing to pay out
+      // against and the ledger row would claim a settlement it cannot prove.
+      if (typeof result.transaction !== "string" || result.transaction.length === 0) {
+        logger.error(
+          { requestId: id, nodeId: headers[NODE_ID_HEADER] ?? null },
+          "settlement reported success without a transaction id; operator payout skipped",
+        );
+        return;
+      }
+
       const amount = result.amount ?? context.requirements.amount;
       if (typeof amount !== "string") {
         throw new SettlementError("settlement reported no amount", { requestId: id });

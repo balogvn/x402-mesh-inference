@@ -184,6 +184,14 @@ export interface GatewayConfig {
   /** When true, nodes whose operator address has not opted in to USDC are not routable. */
   requireUsdcOptIn: boolean;
   /**
+   * Reverse-proxy hops to trust when resolving the client IP.
+   *
+   * 0 (default) trusts no `X-Forwarded-For` header and uses the real socket peer. Anything
+   * higher lets that many proxy hops set the apparent client address, so it must match the
+   * deployment exactly — an over-count lets clients spoof their own rate-limit bucket.
+   */
+  trustProxyHops: number;
+  /**
    * When true, node endpoints may point at private, loopback or link-local addresses.
    *
    * Defaults to false: an operator-supplied endpoint is attacker-controlled input that the
@@ -214,6 +222,7 @@ const GatewayEnvSchema = z.object({
   REDIS_URL: optionalStringField(),
   MESH_REQUIRE_USDC_OPT_IN: boolField(true),
   MESH_ALLOW_PRIVATE_NODE_ENDPOINTS: boolField(false),
+  MESH_TRUST_PROXY_HOPS: intField(0, 0, 10),
   MESH_NODE_REQUEST_TIMEOUT_MS: intField(DEFAULT_NODE_REQUEST_TIMEOUT_MS, 1_000, 600_000),
   MESH_MAX_CONCURRENT_PER_NODE: intField(DEFAULT_MAX_CONCURRENT_PER_NODE, 1, 1_024),
   LOG_LEVEL: enumField(LOG_LEVEL_VALUES, "info"),
@@ -248,6 +257,7 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
     publicBaseUrl: stripTrailingSlash(parsed.MESH_PUBLIC_BASE_URL ?? `http://localhost:${port}`),
     requireUsdcOptIn: parsed.MESH_REQUIRE_USDC_OPT_IN,
     allowPrivateNodeEndpoints: parsed.MESH_ALLOW_PRIVATE_NODE_ENDPOINTS,
+    trustProxyHops: parsed.MESH_TRUST_PROXY_HOPS,
     nodeRequestTimeoutMs: parsed.MESH_NODE_REQUEST_TIMEOUT_MS,
     maxConcurrentPerNode: parsed.MESH_MAX_CONCURRENT_PER_NODE,
     logLevel: parsed.LOG_LEVEL,

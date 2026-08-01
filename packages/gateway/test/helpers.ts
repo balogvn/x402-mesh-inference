@@ -79,6 +79,7 @@ export function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfi
     // Test nodes live on loopback, so the SSRF guard is relaxed by default here. The tests
     // that exercise the guard itself set this back to false explicitly.
     allowPrivateNodeEndpoints: true,
+    trustProxyHops: 0,
     nodeRequestTimeoutMs: 5_000,
     maxConcurrentPerNode: 8,
     logLevel: "silent",
