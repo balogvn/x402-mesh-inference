@@ -1,5 +1,5 @@
 import type { GatewayConfig } from "@x402-mesh/shared";
-import { atomicToWire, usdcAssetId, usdcToAtomic } from "@x402-mesh/shared";
+import { atomicToWire, facilitatorNetwork, usdcAssetId, usdcToAtomic } from "@x402-mesh/shared";
 import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import type { ResourceConfig, RoutesConfig } from "@x402/core/server";
 
@@ -108,13 +108,19 @@ export function discoveryTags(config: GatewayConfig): string[] {
   return [config.challengeTag, ...DISCOVERY_TAGS].slice(0, MAX_DISCOVERY_TAGS);
 }
 
-/** The single {@link ResourceConfig} clients pay against. */
+/**
+ * The single {@link ResourceConfig} clients pay against.
+ *
+ * `network` is the facilitator-facing (full genesis hash) identifier, because the SDK checks
+ * a route's network against the facilitator's `/supported` list verbatim at startup. Asset
+ * resolution still keys off the canonical id — see {@link facilitatorNetwork}.
+ */
 export function buildPaymentOption(config: GatewayConfig): ResourceConfig {
   return {
     scheme: "exact",
     payTo: config.payToAddress,
     price: priceString(config),
-    network: config.network,
+    network: facilitatorNetwork(config.network),
     maxTimeoutSeconds: maxTimeoutSeconds(config),
   };
 }
@@ -173,7 +179,10 @@ export function unpaidPreview(config: GatewayConfig): Record<string, unknown> {
       decimals: 6,
       per: "request",
     },
-    network: config.network,
+    // Must match `accepts[].network` exactly: an agent reads this preview to build its
+    // payment, so advertising the canonical id here while the requirement carries the
+    // facilitator form would hand it a value the facilitator rejects.
+    network: facilitatorNetwork(config.network),
     meshNetwork: config.meshNetwork,
     payTo: config.payToAddress,
     facilitator: config.facilitatorUrl,

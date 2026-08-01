@@ -10,6 +10,7 @@ import type {
 } from "@x402-mesh/shared";
 import {
   ALGORAND_TESTNET,
+  facilitatorNetwork,
   canonicalRegistrationBytes,
   NoCapacityError,
   registrationNonce,
@@ -308,8 +309,11 @@ export class StubPayer implements UsdcPayoutPort {
 /**
  * A {@link FacilitatorClient} that answers entirely from memory.
  *
- * `getSupported` advertises the `exact` scheme on Algorand TestNet, which is what the
- * resource server needs to build a 402 without any HTTP.
+ * `getSupported` advertises the `exact` scheme on Algorand TestNet using the **full padded
+ * genesis hash**, because that is what the real GoPlausible facilitator returns. An earlier
+ * version of this stub answered with the canonical (truncated) id, which no real facilitator
+ * emits — so the suite passed while production died at boot with `missing_facilitator`.
+ * Keep this faithful to the wire format; a stub that is kinder than reality tests nothing.
  */
 export class StubFacilitator implements FacilitatorClient {
   verify(): Promise<{ isValid: boolean; invalidReason?: string }> {
@@ -326,7 +330,7 @@ export class StubFacilitator implements FacilitatorClient {
         {
           x402Version: 2,
           scheme: "exact",
-          network: ALGORAND_TESTNET,
+          network: facilitatorNetwork(ALGORAND_TESTNET),
           extra: { feePayer: TEST_PAY_TO },
         },
       ],

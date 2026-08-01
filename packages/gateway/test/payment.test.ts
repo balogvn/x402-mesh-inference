@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
-import { ALGORAND_TESTNET, usdcAssetId } from "@x402-mesh/shared";
+import * as avm from "@x402/avm";
+import { ALGORAND_TESTNET, facilitatorNetwork, usdcAssetId } from "@x402-mesh/shared";
 import { decodePaymentRequiredHeader } from "@x402/core/http";
 import { createApp } from "../src/app.js";
 import { buildResourceServer } from "../src/x402/server.js";
@@ -62,7 +63,11 @@ describe("402 payment required", () => {
     const requirement = required.accepts[0];
     expect(requirement).toBeDefined();
     expect(requirement?.scheme).toBe("exact");
-    expect(requirement?.network).toBe(ALGORAND_TESTNET);
+    // The wire carries the facilitator's full-genesis-hash id, NOT the canonical truncated
+    // one. Asserting the canonical form here is what let the boot-time `missing_facilitator`
+    // crash reach production; see docs/x402-integration-notes.md §2.
+    expect(requirement?.network).toBe(facilitatorNetwork(ALGORAND_TESTNET));
+    expect(avm.normalizeAlgorandNetwork(requirement?.network ?? "")).toBe(ALGORAND_TESTNET);
     expect(requirement?.payTo).toBe(TEST_PAY_TO);
     // $0.0020 with 6 decimals is exactly 2000 atomic units — integer, never a float.
     expect(requirement?.amount).toBe("2000");

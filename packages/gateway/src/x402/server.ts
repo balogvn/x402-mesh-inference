@@ -1,4 +1,5 @@
 import type { GatewayConfig } from "@x402-mesh/shared";
+import { facilitatorNetwork } from "@x402-mesh/shared";
 import { ExactAvmScheme } from "@x402/avm/exact/server";
 import { HTTPFacilitatorClient, x402ResourceServer } from "@x402/core/server";
 import type { FacilitatorClient } from "@x402/core/server";
@@ -12,8 +13,11 @@ import type { FacilitatorClient } from "@x402/core/server";
  * the `/exact/server` one. Importing either of the others compiles cleanly and then fails at
  * runtime, which is exactly the kind of mistake worth spelling out.
  *
- * The network is registered in canonical (truncated genesis hash) CAIP-2 form; `GatewayConfig`
- * has already normalized it, so no reconciliation is needed here.
+ * The scheme is registered under the **facilitator-facing** network id, not the canonical
+ * one. `initialize` matches a route's network against the facilitator's `/supported` list
+ * verbatim, and that list carries the full padded genesis hash — registering the canonical
+ * (truncated) form makes the gateway throw `missing_facilitator` on boot. See
+ * {@link facilitatorNetwork}.
  *
  * @param config - Resolved gateway configuration.
  * @param facilitator - Facilitator client override. Tests pass a stub so no HTTP happens;
@@ -25,5 +29,8 @@ export function buildResourceServer(
   facilitator?: FacilitatorClient,
 ): x402ResourceServer {
   const client = facilitator ?? new HTTPFacilitatorClient({ url: config.facilitatorUrl });
-  return new x402ResourceServer(client).register(config.network, new ExactAvmScheme());
+  return new x402ResourceServer(client).register(
+    facilitatorNetwork(config.network),
+    new ExactAvmScheme(),
+  );
 }

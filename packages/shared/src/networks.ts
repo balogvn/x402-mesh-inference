@@ -23,6 +23,46 @@ export const USDC_DECIMALS = 6;
 const SUPPORTED_NETWORKS: readonly Network[] = [ALGORAND_MAINNET, ALGORAND_TESTNET];
 
 /**
+ * Canonical CAIP-2 -> the full-genesis-hash form the facilitator actually advertises.
+ *
+ * Algorand CAIP-2 truncates the genesis hash to 32 characters, and `@x402/avm` exports the
+ * constants in that canonical form. The GoPlausible facilitator's `/supported` response,
+ * however, lists the **full padded** genesis hash. `x402HTTPResourceServer.initialize`
+ * compares a route's declared network against that list **verbatim**, so declaring the
+ * canonical form makes the gateway refuse to boot:
+ *
+ *     RouteConfigurationError: Facilitator does not support scheme "exact"
+ *     on network "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe"  (reason: missing_facilitator)
+ *
+ * Verified against the live facilitator: the canonical form throws, the full form
+ * initializes. Derived from the SDK's own genesis-hash constants rather than string-pasted.
+ */
+const FACILITATOR_NETWORK: Readonly<Record<string, Network>> = {
+  [ALGORAND_MAINNET]: `algorand:${avm.ALGORAND_MAINNET_GENESIS_HASH}`,
+  [ALGORAND_TESTNET]: `algorand:${avm.ALGORAND_TESTNET_GENESIS_HASH}`,
+};
+
+/**
+ * Maps a canonical network id to the form the facilitator expects on the wire.
+ *
+ * Use this **only** at the x402 boundary — the resource-server `register()` call and the
+ * `network` field of a payment requirement. Everything internal (asset lookup, storage,
+ * comparison) stays canonical, so there is exactly one representation in the domain and one
+ * at the edge.
+ *
+ * @param network - Canonical CAIP-2 network identifier.
+ * @returns The facilitator-facing identifier.
+ * @throws {ConfigError} if the network is not a supported Algorand network.
+ */
+export function facilitatorNetwork(network: Network): Network {
+  const mapped = FACILITATOR_NETWORK[network];
+  if (mapped === undefined) {
+    throw new ConfigError(`no facilitator network mapping for ${network}`, { network });
+  }
+  return mapped;
+}
+
+/**
  * Resolves a {@link MeshNetwork} selector to its canonical CAIP-2 identifier.
  *
  * @throws {ConfigError} if the selector is not "mainnet" or "testnet".

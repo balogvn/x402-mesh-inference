@@ -65,6 +65,37 @@ avm.normalizeAlgorandNetwork("algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkki
 externally-sourced network string through `normalizeAlgorandNetwork()` at the boundary.
 Never string-compare a raw facilitator network value against a local constant.
 
+### The boot-time failure this causes (confirmed in production, not theory)
+
+`normalizeAlgorandNetwork()` fixes comparisons **you** perform. It does not help inside the
+SDK. `x402HTTPResourceServer.initialize` — which `paymentMiddleware` runs on startup when
+`syncFacilitatorOnStart` is left at its default `true` — matches each route's declared
+`network` against the facilitator's `/supported` list **verbatim**. Declaring the canonical
+form therefore kills the process at boot:
+
+```
+RouteConfigurationError: x402 Route Configuration Errors:
+  - Route "POST /v1/chat/completions": Facilitator does not support scheme "exact"
+    on network "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe"
+  reason: 'missing_facilitator'
+```
+
+It is thrown **asynchronously**, after `app.listen` has already logged "gateway listening",
+so the process looks healthy for a moment and then dies — and a `try/catch` around
+`paymentMiddleware(...)` will not catch it.
+
+Verified against the live facilitator: canonical form → throws; full genesis-hash form →
+initializes cleanly.
+
+**Therefore:** use the **full padded genesis hash** for the two x402 wire surfaces — the
+`register()` call and `PaymentRequirements.network` — while keeping canonical everywhere
+else (asset lookup, storage, comparison). `USDC_CONFIG` is keyed by **canonical**, so a
+facilitator-form key throws. `@x402-mesh/shared` exposes `facilitatorNetwork(canonical)` for
+exactly this one hop; derive it from `ALGORAND_*_GENESIS_HASH` rather than pasting strings.
+
+No unit test catches this, because a stubbed facilitator reports whatever you tell it to.
+Only booting the gateway against the real facilitator does.
+
 The brief's placeholder tokens `ALGORAND_Mainnet_CAIP2` / `ALGORAND_Testnet_CAIP2` are **not**
 real values — substitute the constants above.
 
