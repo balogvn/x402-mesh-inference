@@ -19,6 +19,7 @@ import type {
 } from "./ports.js";
 import { createChatRouter, NODE_ID_HEADER } from "./routes/chat.js";
 import { createDiscoveryRouter } from "./routes/discovery.js";
+import { createLandingRouter } from "./routes/landing.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createNodeRouter } from "./routes/nodes.js";
 import { HttpNodeRouter } from "./services/router.js";
@@ -127,6 +128,7 @@ export function createApp(deps: GatewayDeps): Express {
 
   // Free surface. Mounted before the paywall so no configuration mistake can start charging
   // for discovery or for a health check.
+  app.use(createLandingRouter({ config }));
   app.use(createHealthRouter(buildHealthDeps(deps, logger, now)));
   app.use(
     createDiscoveryRouter({ config, logger, ...(deps.specDir ? { specDir: deps.specDir } : {}) }),

@@ -60,6 +60,7 @@ export type { RetryPolicy, SettlementDeps } from "./services/settlement.js";
 export { initTelemetry, withSpan } from "./telemetry/otel.js";
 
 export { errorHandler } from "./middleware/errorHandler.js";
+export { createLandingRouter, renderLanding, landingEconomics } from "./routes/landing.js";
 export { payerFromRequest, rateLimit, rateLimitKey } from "./middleware/rateLimit.js";
 export { getRequestId, REQUEST_ID_HEADER, requestId } from "./middleware/requestId.js";
 
