@@ -176,6 +176,12 @@ export function buildProgram(): Command {
       const options: Parameters<typeof doctorCommand>[0] = {};
       if (flags.offline === true) options.offline = true;
       if (flags.algodUrl !== undefined) options.algod = { baseUrl: flags.algodUrl };
+      // Same secret `start` uses. Diagnosing the backend without it probes a different
+      // system than the one that will actually serve traffic.
+      const doctorApiKey = process.env["MESH_PROVIDER_API_KEY"];
+      if (doctorApiKey !== undefined && doctorApiKey.length > 0) {
+        options.providerApiKey = doctorApiKey;
+      }
       const report = await doctorCommand(options);
       if (!report.ok) process.exitCode = 1;
     });

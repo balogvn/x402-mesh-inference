@@ -1,5 +1,7 @@
 import request from "supertest";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { resetEndpointValidationCache } from "@x402-mesh/shared";
 
 import { createApp } from "../src/app.js";
 import {
@@ -21,6 +23,13 @@ import {
  * gateway to issue a real request to cloud instance metadata. Node registration is open to
  * anyone who can generate an Algorand keypair, so this was reachable by any attacker.
  */
+// The endpoint validation cache is module-level state. Clearing it between tests keeps each
+// case independent of what ran before it — a security assertion that depends on test order is
+// worse than no assertion.
+beforeEach(() => {
+  resetEndpointValidationCache();
+});
+
 describe("SSRF guard on operator-supplied endpoints", () => {
   it("refuses to register a cloud-metadata endpoint", async () => {
     const app = createApp({

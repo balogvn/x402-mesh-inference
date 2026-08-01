@@ -113,18 +113,63 @@ fly tokens create deploy -x 999999h
 The workflow skips the Fly steps entirely when the token is absent, so forks and
 unconfigured clones stay green.
 
-## 6. Attach a node
+## 6. Attach a demo node (no GPU required)
 
-A gateway with no nodes returns `503 no_capacity` on every paid request. Run a daemon
-somewhere the gateway can reach — note `MESH_NODE_ENDPOINT` must be **publicly reachable**,
-because the deployed gateway rejects private and loopback addresses (the SSRF guard):
+**A gateway with no nodes answers `503 no_capacity` to every paid request.** Deploying only
+the gateway gives a judge nothing that works, so this step is not optional for a demo.
+
+You do not need a GPU. The daemon's `openai` provider speaks the same wire protocol as vLLM,
+so it can front any hosted OpenAI-compatible API — Groq, Together, OpenRouter, DeepInfra,
+Fireworks, OpenAI itself, or your own vLLM. Only the base URL and the model name change.
+
+Pick a backend and get an API key, then edit [fly.node.toml](../fly.node.toml) so
+`MESH_PROVIDER_BASE_URL` and `MESH_MODELS` match it. The defaults point at Groq, which has a
+free tier. Two constraints worth respecting:
+
+- `MESH_MODELS` must name a model the backend **actually serves**. Advertising one it does
+  not have makes the gateway route paid requests here and then fail them.
+- `MESH_NODE_ENDPOINT` must be the node's **public** URL. The gateway fetches it on every
+  routed request and its SSRF guard rejects private and loopback addresses.
+
+Create the app and set its secrets. The operator key is a _different_ account from the
+gateway's `payTo` — this one receives the $0.0017 payouts:
 
 ```bash
-MESH_GATEWAY_URL=https://x402-mesh-gateway.fly.dev MESH_NODE_ENDPOINT=https://your-node.example.com npx x402-mesh-node doctor
+fly apps create x402-mesh-node
 ```
 
-`doctor` checks the backend, the key, the derived address and the on-chain prerequisites
-before you commit to `start`.
+```bash
+npm run keygen -- --network testnet
+```
+
+```bash
+fly secrets set --config fly.node.toml AVM_PRIVATE_KEY=<the node operator key> MESH_PROVIDER_API_KEY=<your backend api key>
+```
+
+Check everything before deploying. `doctor` verifies the backend is reachable **with your
+API key**, that every advertised model exists, that the key derives a valid address, and that
+the account is funded and opted in:
+
+```bash
+MESH_PROVIDER_API_KEY=<your backend api key> AVM_PRIVATE_KEY=<the node operator key> MESH_GATEWAY_URL=https://x402-mesh-gateway.fly.dev MESH_NODE_ENDPOINT=https://x402-mesh-node.fly.dev MESH_PROVIDER=openai MESH_PROVIDER_BASE_URL=https://api.groq.com/openai MESH_MODELS=llama-3.3-70b-versatile npx tsx packages/node-daemon/src/cli.ts doctor
+```
+
+Then deploy and confirm the gateway can see it:
+
+```bash
+fly deploy --config fly.node.toml
+```
+
+```bash
+curl -s https://x402-mesh-gateway.fly.dev/v1/nodes
+```
+
+You want `count: 1` with `"healthy": true` and `"routable": true`. If `routable` is false,
+the operator account has not opted in to USDC — the gateway stores the node but will not send
+it paid work, because it could not be paid.
+
+> The node operator account needs the USDC opt-in for the same reason the gateway's does:
+> Algorand cannot deliver an asset to an account that has not opted in. `doctor` checks it.
 
 ## 7. Switch to MainNet
 

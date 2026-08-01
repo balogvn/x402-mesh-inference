@@ -318,3 +318,58 @@ describe("portFromEndpoint", () => {
     expect(portFromEndpoint("")).toBe(DEFAULT_NODE_PORT);
   });
 });
+
+/**
+ * Regression: `doctor` must probe the backend with the same credentials `start` uses.
+ *
+ * `start` reads MESH_PROVIDER_API_KEY and attaches it as a bearer token; `doctor` did not,
+ * so against any authenticated backend (OpenAI, Groq, Together, OpenRouter) it probed
+ * anonymously, got 401, and reported "provider unreachable" for a node that would have run
+ * fine. Since doctor is the command an operator runs first, that sent them chasing a problem
+ * that did not exist.
+ */
+describe("runDoctor authenticates to the inference backend", () => {
+  /**
+   * Captures the Authorization header doctor sends to the models endpoint.
+   *
+   * @param providerApiKey - Key to pass through DoctorOptions, if any.
+   * @returns The header value observed, or null when none was sent.
+   */
+  async function observedAuth(providerApiKey?: string): Promise<string | null> {
+    let seen: string | null = null;
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/models")) {
+        const headers = new Headers(init?.headers ?? {});
+        seen = headers.get("authorization");
+        return makeResponse({
+          status: 200,
+          body: { object: "list", data: [{ id: "llama3.1:8b" }] },
+        });
+      }
+      return makeResponse({ status: 200, body: { status: "ok" } });
+    }) as unknown as DoctorOptions["fetchImpl"];
+
+    const options: DoctorOptions = {
+      env: daemonEnv({ MESH_PROVIDER: "openai", MESH_PROVIDER_BASE_URL: "http://backend.test" }),
+      offline: false,
+      algod: { baseUrl: ALGOD_BASE },
+    };
+    if (fetchImpl !== undefined) options.fetchImpl = fetchImpl;
+    if (providerApiKey !== undefined) options.providerApiKey = providerApiKey;
+    await runDoctor(options);
+    return seen;
+  }
+
+  it("sends the bearer token when one is configured", async () => {
+    expect(await observedAuth("sk-secret-token")).toBe("Bearer sk-secret-token");
+  });
+
+  it("sends no Authorization header when no key is configured", async () => {
+    expect(await observedAuth()).toBeNull();
+  });
+
+  it("ignores an empty key rather than sending an empty bearer", async () => {
+    expect(await observedAuth("")).toBeNull();
+  });
+});

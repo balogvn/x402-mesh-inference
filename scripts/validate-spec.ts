@@ -364,6 +364,32 @@ function validateDockerEntrypoints(checklist: Checklist): void {
     checklist.pass("daemon dockerfile CMD", `runs \`${named.join(", ")}\``);
   }
 
+  // The HEALTHCHECK must probe a path the daemon actually serves. It probed /healthz while
+  // the daemon serves /health, so every container reported unhealthy forever — orchestrators
+  // restart-loop on that, and compose `depends_on: service_healthy` never releases.
+  const served = /path === "(\/[a-z]+)"/g;
+  let serverSrc = "";
+  try {
+    serverSrc = readFileSync("packages/node-daemon/src/server.ts", "utf8");
+  } catch {
+    /* checked below via the empty route set */
+  }
+  const routes = new Set<string>();
+  for (const m of serverSrc.matchAll(served)) if (m[1] !== undefined) routes.add(m[1]);
+  const probed = /pathname='([^']+)'/.exec(daemon)?.[1];
+  if (probed === undefined) {
+    checklist.fail("daemon healthcheck path", "no HEALTHCHECK pathname found");
+  } else if (routes.size === 0) {
+    checklist.fail("daemon healthcheck path", "could not read the daemon's routes to compare");
+  } else if (!routes.has(probed)) {
+    checklist.fail(
+      "daemon healthcheck path",
+      `HEALTHCHECK probes ${probed} but the daemon serves ${[...routes].join(", ")}`,
+    );
+  } else {
+    checklist.pass("daemon healthcheck path", `${probed} is served`);
+  }
+
   const gatewayPath = "docker/Dockerfile.gateway";
   try {
     const gateway = readFileSync(gatewayPath, "utf8");

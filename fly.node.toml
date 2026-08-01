@@ -1,0 +1,76 @@
+# Fly.io deployment for a demo mesh node backed by any OpenAI-compatible API.
+#
+# A gateway with no nodes answers `503 no_capacity` to every paid request, so a judge or an
+# autonomous agent hitting the deployment sees nothing work. This runs one node without a GPU
+# by pointing the daemon's `openai` provider at a hosted inference API.
+#
+#   fly apps create x402-mesh-node
+#   fly secrets set --config fly.node.toml AVM_PRIVATE_KEY=... MESH_PROVIDER_API_KEY=...
+#   fly deploy --config fly.node.toml
+#
+# Full walkthrough: docs/deploy-fly.md
+
+app = "x402-mesh-node"
+primary_region = "iad"
+
+[build]
+  dockerfile = "docker/Dockerfile.node-daemon"
+
+[env]
+  NODE_ENV = "production"
+  LOG_LEVEL = "info"
+  MESH_NETWORK = "testnet"
+
+  # The gateway this node joins.
+  MESH_GATEWAY_URL = "https://x402-mesh-gateway.fly.dev"
+
+  # This node's own publicly reachable URL. The gateway fetches it on every routed request,
+  # and its SSRF guard rejects private and loopback addresses — so this MUST be the real
+  # external hostname, not 127.0.0.1. It also fixes the port the daemon listens on.
+  MESH_NODE_ENDPOINT = "https://x402-mesh-node.fly.dev"
+
+  MESH_NODE_ID = "demo-node-01"
+
+  # Any OpenAI-compatible backend. `openai` speaks the same wire protocol as vLLM, so this
+  # works with OpenAI, Groq, Together, OpenRouter, DeepInfra, Fireworks or a self-hosted vLLM
+  # — only the base URL and the model name change.
+  MESH_PROVIDER = "openai"
+  MESH_PROVIDER_BASE_URL = "https://api.groq.com/openai"
+
+  # Must be a model the backend above actually serves; `doctor` verifies this before you
+  # deploy. Advertising a model the backend does not have makes the gateway route paid
+  # requests here and then fail them.
+  MESH_MODELS = "llama-3.3-70b-versatile"
+
+  # Keep this at or below what the backend's rate limit tolerates. The daemon returns 503
+  # when saturated, which the gateway treats as a signal to route elsewhere rather than an
+  # error — so a conservative value degrades gracefully instead of failing requests.
+  MESH_MAX_CONCURRENCY = "4"
+
+  MESH_HEARTBEAT_INTERVAL_MS = "15000"
+
+[http_service]
+  internal_port = 8500
+  force_https = true
+
+  # A node that is asleep when the gateway forwards a request fails that request, and the
+  # gateway marks it unhealthy. Keep one machine warm.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+# The daemon serves /health — NOT /healthz. The gateway uses /healthz; the daemon does not.
+# Probing the wrong one marks the machine unhealthy forever, which is a restart loop that
+# looks like a networking problem. `npx tsx scripts/validate-spec.ts` asserts this path
+# against the daemon's actual routes.
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "30s"
+  method = "GET"
+  path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

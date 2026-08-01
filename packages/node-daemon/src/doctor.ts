@@ -54,6 +54,14 @@ export interface DoctorOptions {
   algod?: AlgodReaderOptions;
   /** Skips every network-touching check. Used to diagnose configuration alone. */
   offline?: boolean;
+  /**
+   * Bearer token for the inference backend, from `MESH_PROVIDER_API_KEY`.
+   *
+   * Without this, `doctor` probes an authenticated backend anonymously and reports it
+   * unreachable — while `start`, which does send the token, works fine. Since `doctor` is the
+   * command an operator runs *first*, that sends them chasing a problem that does not exist.
+   */
+  providerApiKey?: string;
 }
 
 /** Base Algorand minimum balance requirement, in microALGO. */
@@ -115,9 +123,14 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
     return finish(checks);
   }
 
-  const provider =
-    options.provider ??
-    createProvider(config, options.fetchImpl ? { fetchImpl: options.fetchImpl } : {});
+  const providerOverrides: { fetchImpl?: FetchLike; apiKey?: string } = {};
+  if (options.fetchImpl !== undefined) providerOverrides.fetchImpl = options.fetchImpl;
+  // Must match what `start` sends, or doctor diagnoses a different system than the one that
+  // will actually run.
+  if (options.providerApiKey !== undefined && options.providerApiKey.length > 0) {
+    providerOverrides.apiKey = options.providerApiKey;
+  }
+  const provider = options.provider ?? createProvider(config, providerOverrides);
 
   let available: string[] | null = null;
   try {

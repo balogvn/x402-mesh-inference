@@ -209,12 +209,12 @@ export async function assertRoutableEndpoint(
   if (options.allowPrivate === true) return url;
 
   const now = options.now ?? Date.now;
-  const cached = resolutionCache.get(url.host);
-  if (cached !== undefined && cached > now()) return url;
-
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
 
-  // A literal IP needs no resolution — check it directly.
+  // A literal IP is checked directly and is deliberately NOT served from the cache. The cache
+  // exists to avoid re-resolving a hostname on every routed request; an address literal costs
+  // nothing to re-check, and skipping the cache here removes any path by which a cached entry
+  // could vouch for a raw address.
   if (isIP(hostname) !== 0) {
     if (isBlockedAddress(hostname)) {
       throw new ValidationError("endpoint resolves to a non-public address", {
@@ -225,6 +225,9 @@ export async function assertRoutableEndpoint(
     rememberHost(url.host, now());
     return url;
   }
+
+  const cached = resolutionCache.get(url.host);
+  if (cached !== undefined && cached > now()) return url;
 
   let addresses: string[];
   try {

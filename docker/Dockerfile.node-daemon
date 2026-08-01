@@ -85,7 +85,7 @@ EXPOSE 8500
 # externally reachable URL, so the probe reuses its port but dials loopback — a container that
 # cannot answer on its own port is unhealthy regardless of whether DNS resolves its public name.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD node -e "const u=new URL(process.env.MESH_NODE_ENDPOINT||'http://127.0.0.1:8500');u.hostname='127.0.0.1';u.protocol='http:';u.pathname='/healthz';fetch(u).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+    CMD node -e "const u=new URL(process.env.MESH_NODE_ENDPOINT||'http://127.0.0.1:8500');u.hostname='127.0.0.1';u.protocol='http:';u.pathname='/health';fetch(u).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 ENTRYPOINT ["/sbin/tini", "--"]
 # The `start` subcommand is required. `cli.js` on its own is a commander program with no
