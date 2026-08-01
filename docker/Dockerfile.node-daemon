@@ -1,0 +1,96 @@
+# syntax=docker/dockerfile:1.7
+#
+# x402 Mesh Inference — compute node daemon image.
+#
+# Build from the repository root:
+#   docker build -f docker/Dockerfile.node-daemon -t x402-mesh-node .
+#
+# This is the image a GPU operator runs. It holds the operator's Algorand key in
+# AVM_PRIVATE_KEY, so it is built to be as small and as unprivileged as possible: production
+# dependencies only, no toolchain, no source, non-root.
+#
+# The key belongs in a secret store or a mounted file, never in the image and never in a
+# `docker run -e` line that lands in shell history. See docker/docker-compose.yml.
+
+ARG NODE_VERSION=22-alpine
+
+# ---------------------------------------------------------------------------------------------
+# base
+# ---------------------------------------------------------------------------------------------
+FROM node:${NODE_VERSION} AS base
+ENV NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+WORKDIR /app
+
+# ---------------------------------------------------------------------------------------------
+# deps — full workspace tree, cached on the manifests alone
+# ---------------------------------------------------------------------------------------------
+FROM base AS deps
+COPY package.json package-lock.json ./
+COPY packages/shared/package.json packages/shared/package.json
+COPY packages/registry/package.json packages/registry/package.json
+COPY packages/gateway/package.json packages/gateway/package.json
+COPY packages/node-daemon/package.json packages/node-daemon/package.json
+RUN --mount=type=cache,target=/root/.npm npm ci
+
+# ---------------------------------------------------------------------------------------------
+# build
+# ---------------------------------------------------------------------------------------------
+FROM deps AS build
+COPY tsconfig.base.json tsconfig.json ./
+COPY packages ./packages
+RUN npm run build
+
+# ---------------------------------------------------------------------------------------------
+# prod-deps — runtime tree only, from the same lockfile
+# ---------------------------------------------------------------------------------------------
+FROM base AS prod-deps
+COPY package.json package-lock.json ./
+COPY packages/shared/package.json packages/shared/package.json
+COPY packages/registry/package.json packages/registry/package.json
+COPY packages/gateway/package.json packages/gateway/package.json
+COPY packages/node-daemon/package.json packages/node-daemon/package.json
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev
+
+# ---------------------------------------------------------------------------------------------
+# runtime
+# ---------------------------------------------------------------------------------------------
+FROM node:${NODE_VERSION} AS runtime
+
+# tini forwards SIGTERM so the daemon can deregister cleanly instead of being killed after the
+# stop grace period, which would leave the gateway routing to a node that is already gone.
+RUN apk add --no-cache tini
+
+ENV NODE_ENV=production \
+    MESH_PROVIDER=ollama \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+WORKDIR /app
+
+COPY --chown=node:node package.json ./
+COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/packages/shared/package.json ./packages/shared/package.json
+COPY --from=build --chown=node:node /app/packages/shared/dist ./packages/shared/dist
+COPY --from=build --chown=node:node /app/packages/node-daemon/package.json ./packages/node-daemon/package.json
+COPY --from=build --chown=node:node /app/packages/node-daemon/dist ./packages/node-daemon/dist
+
+# The daemon imports only @x402-mesh/shared. Drop the workspace symlinks for packages this
+# image does not ship, so nothing in node_modules dangles.
+RUN rm -rf node_modules/@x402-mesh/gateway node_modules/@x402-mesh/registry
+
+USER node
+EXPOSE 8500
+
+# The daemon serves the inference endpoint the gateway forwards to. MESH_NODE_ENDPOINT is the
+# externally reachable URL, so the probe reuses its port but dials loopback — a container that
+# cannot answer on its own port is unhealthy regardless of whether DNS resolves its public name.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD node -e "const u=new URL(process.env.MESH_NODE_ENDPOINT||'http://127.0.0.1:8500');u.hostname='127.0.0.1';u.protocol='http:';u.pathname='/healthz';fetch(u).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "--enable-source-maps", "packages/node-daemon/dist/cli.js"]
+
+LABEL org.opencontainers.image.title="x402 Mesh Inference Node Daemon" \
+      org.opencontainers.image.description="Registers a local LLM backend with an x402 mesh gateway and serves paid inference." \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/balogvn/x402-mesh-inference"

@@ -1,0 +1,1567 @@
+openapi: 3.1.0
+
+info:
+  title: x402 Mesh Inference Gateway
+  version: 0.1.0
+  summary: Pay-per-prompt OpenAI-compatible inference, settled in USDC on Algorand via x402.
+  description: |
+    A decentralized compute marketplace. Agents call an OpenAI-compatible
+    `POST /v1/chat/completions` endpoint; the gateway answers `402 Payment Required` with an
+    x402 v2 challenge, the caller re-sends the request carrying an `X-PAYMENT` header, and the
+    gateway routes the prompt to the best available community GPU node.
+
+    ## Payment flow
+
+    1. `POST /v1/chat/completions` **without** `X-PAYMENT` → `402` with a `PaymentRequired`
+       body. Its `accepts[]` carries the `exact` scheme on Algorand, the USDC ASA id, and the
+       price in **atomic units** (`"2000"` = $0.0020 USDC, 6 decimals).
+    2. The client builds an atomic Algorand transaction group (the facilitator's fee-payer
+       transaction plus the client's ASA transfer), base64-encodes the resulting
+       `PaymentPayload` as JSON, and sends it in the `X-PAYMENT` request header.
+    3. The gateway verifies and settles through the facilitator, routes the prompt to a node,
+       and returns the completion together with a `PAYMENT-RESPONSE` header carrying the
+       base64-encoded `SettleResponse`.
+
+    Payment is **gasless for the client**: the facilitator sponsors the ALGO transaction fee
+    (advertised as `accepts[].extra.feePayer`), so the caller only signs the USDC transfer leg.
+
+    ## Money representation
+
+    Every monetary field on the wire is a **decimal string of integer atomic units**. USDC has
+    6 decimals on both Algorand networks, so `"2000"` is $0.0020. Amounts are never floats.
+    The economic invariant `inboundAtomic - payoutAtomic == marginAtomic` holds on every
+    settlement record, with all three legs non-negative.
+
+    ## Network identifiers
+
+    Algorand CAIP-2 identifiers exist in two encodings that denote the same chain: the
+    canonical 32-character truncated genesis hash used by the SDK
+    (`algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k`) and the full padded genesis hash advertised
+    by the live facilitator (`algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=`). This
+    API accepts either on input and always emits the canonical form.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  contact:
+    name: x402 Mesh Inference
+    url: https://github.com/balogvn/x402-mesh-inference
+
+externalDocs:
+  description: x402 protocol and Algorand integration notes
+  url: https://github.com/balogvn/x402-mesh-inference/blob/main/docs/x402-integration-notes.md
+
+servers:
+  - url: http://localhost:8402
+    description: Local development (default gateway port)
+  - url: https://mesh.example.com
+    description: Deployed gateway (replace with your MESH_PUBLIC_BASE_URL)
+
+tags:
+  - name: inference
+    description: OpenAI-compatible paid inference.
+  - name: nodes
+    description: Compute node registration, liveness and discovery.
+  - name: settlements
+    description: Two-legged USDC settlement audit trail.
+  - name: operations
+    description: Liveness, readiness and x402 service discovery.
+
+security: []
+
+paths:
+  /v1/chat/completions:
+    post:
+      operationId: createChatCompletion
+      tags: [inference]
+      summary: Run a paid chat completion on the mesh.
+      description: |
+        OpenAI-compatible chat completion. Requires a valid `X-PAYMENT` header; without one the
+        gateway responds `402` with the payment challenge describing exactly what to pay.
+
+        Set `stream: true` to receive the completion as Server-Sent Events. The payment is
+        verified and settled **before** the first SSE frame is written, so a `200` with
+        `Content-Type: text/event-stream` implies the payment already succeeded.
+
+        Unknown request properties are ignored rather than rejected, so OpenAI SDK clients that
+        send fields this gateway does not implement (`n`, `presence_penalty`, `user`, …) work
+        unchanged. Only validated fields are forwarded to the node.
+      security:
+        - x402Payment: []
+      parameters:
+        - $ref: "#/components/parameters/XPaymentHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+            examples:
+              nonStreaming:
+                summary: Buffered completion
+                value:
+                  model: llama3.1:8b
+                  messages:
+                    - role: system
+                      content: You are a terse assistant.
+                    - role: user
+                      content: Explain the x402 protocol in one sentence.
+                  max_tokens: 256
+                  temperature: 0.2
+              streaming:
+                summary: Server-Sent Events completion
+                value:
+                  model: llama3.1:8b
+                  messages:
+                    - role: user
+                      content: Stream me a haiku about micropayments.
+                  stream: true
+      responses:
+        "200":
+          description: |
+            Completion produced and payment settled. `PAYMENT-RESPONSE` carries the base64 JSON
+            `SettleResponse` for the inbound (client to gateway) leg.
+          headers:
+            PAYMENT-RESPONSE:
+              $ref: "#/components/headers/PaymentResponse"
+            X-Mesh-Node-Id:
+              $ref: "#/components/headers/MeshNodeId"
+            X-Mesh-Request-Id:
+              $ref: "#/components/headers/MeshRequestId"
+            X-Mesh-Route-Reason:
+              $ref: "#/components/headers/MeshRouteReason"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletionResponse"
+              example:
+                id: chatcmpl-0f3a9c1f5b2e4d7a
+                object: chat.completion
+                created: 1785772800
+                model: llama3.1:8b
+                choices:
+                  - index: 0
+                    message:
+                      role: assistant
+                      content: x402 turns HTTP 402 into a working payment handshake.
+                    finish_reason: stop
+                usage:
+                  prompt_tokens: 24
+                  completion_tokens: 12
+                  total_tokens: 36
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Newline-delimited SSE frames. Each `data:` line is a JSON
+                  `ChatCompletionChunk`; the stream is terminated by the literal frame
+                  `data: [DONE]`. Individual frames are validated against
+                  `#/components/schemas/ChatCompletionChunk`.
+                contentMediaType: text/event-stream
+              x-sse-frame:
+                description: |
+                  Schema every `data:` frame decodes to, except the terminal `data: [DONE]`
+                  sentinel. SSE has no standard OpenAPI representation for per-frame schemas,
+                  so this extension carries it.
+                schema:
+                  $ref: "#/components/schemas/ChatCompletionChunk"
+              example: |
+                data: {"id":"chatcmpl-0f3a9c1f5b2e4d7a","object":"chat.completion.chunk","created":1785772800,"model":"llama3.1:8b","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+                data: {"id":"chatcmpl-0f3a9c1f5b2e4d7a","object":"chat.completion.chunk","created":1785772800,"model":"llama3.1:8b","choices":[{"index":0,"delta":{"content":"Coins"},"finish_reason":null}]}
+
+                data: {"id":"chatcmpl-0f3a9c1f5b2e4d7a","object":"chat.completion.chunk","created":1785772800,"model":"llama3.1:8b","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+                data: [DONE]
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/NoCapacity"
+
+  /v1/nodes/register:
+    post:
+      operationId: registerNode
+      tags: [nodes]
+      summary: Register a compute node with the mesh.
+      description: |
+        Registration is self-signed: the operator signs the canonical serialization of the
+        `registration` object with the Ed25519 key behind `operatorAddress`, and the gateway
+        rejects any body whose signature, public key or address do not agree.
+
+        The signing payload is
+        `UTF-8("x402-mesh/node-registration/v1" + "\n" + canonicalJson(projection))`, where
+        `projection` is the registration restricted to its eight fields (capabilities keep
+        `model`, `contextWindow`, `pricePer1kTokensUsdc` and, when present, `quantization`),
+        object keys are sorted, and `network` is normalized to canonical CAIP-2 first.
+
+        `timestamp` must be within 120 seconds of the gateway clock and `nonce` must not have
+        been seen before, which together bound registration replay.
+
+        Registration also verifies **on chain** that `operatorAddress` has opted in to the USDC
+        ASA. An account cannot receive an ASA it has not opted into, so a node that skips the
+        opt-in would silently fail every payout. When `MESH_REQUIRE_USDC_OPT_IN` is enabled a
+        node without the opt-in is stored but is not routable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignedNodeRegistration"
+      responses:
+        "201":
+          description: Node registered (or its existing record replaced).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeRecord"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: |
+            The `nodeId` is already registered to a different `operatorAddress`, or the `nonce`
+            has already been used.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeshError"
+              example:
+                error:
+                  code: validation_error
+                  message: nodeId is already registered to another operator
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/nodes/{nodeId}/heartbeat:
+    post:
+      operationId: heartbeatNode
+      tags: [nodes]
+      summary: Report node liveness and load.
+      description: |
+        Sent by the node daemon every `MESH_HEARTBEAT_INTERVAL_MS` (15s by default). Carries the
+        node's self-reported load so the router can shed traffic before a node saturates.
+
+        Authenticated with the same Ed25519 envelope as registration, over the domain
+        `x402-mesh/node-heartbeat/v1`. Missing heartbeats mark the node unhealthy and remove it
+        from routing until it recovers.
+      parameters:
+        - $ref: "#/components/parameters/NodeIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignedNodeHeartbeat"
+      responses:
+        "200":
+          description: Heartbeat accepted; the gateway's updated view of the node is returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeHealth"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/nodes:
+    get:
+      operationId: listNodes
+      tags: [nodes]
+      summary: List registered compute nodes.
+      description: |
+        Public read model of the mesh. Useful for a leaderboard, for operators checking their
+        own node's health, and for clients deciding whether a model has capacity before paying.
+      parameters:
+        - name: model
+          in: query
+          required: false
+          description: Only return nodes advertising this exact model identifier.
+          schema:
+            type: string
+            maxLength: 200
+          example: llama3.1:8b
+        - name: healthy
+          in: query
+          required: false
+          description: When true, only nodes currently eligible for routing are returned.
+          schema:
+            type: boolean
+            default: false
+        - name: network
+          in: query
+          required: false
+          description: Filter by settlement network, in either CAIP-2 encoding.
+          schema:
+            $ref: "#/components/schemas/Network"
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of nodes to return.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        "200":
+          description: The current node set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/settlements:
+    get:
+      operationId: listSettlements
+      tags: [settlements]
+      summary: Read the USDC settlement audit trail.
+      description: |
+        One record per routed request, covering both legs: the inbound capture from the client
+        and the payout to the node operator. Every record satisfies
+        `inboundAtomic - payoutAtomic == marginAtomic`.
+      parameters:
+        - name: nodeId
+          in: query
+          required: false
+          description: Only return settlements routed to this node.
+          schema:
+            type: string
+            maxLength: 128
+        - name: status
+          in: query
+          required: false
+          description: Only return settlements in this state.
+          schema:
+            type: string
+            enum: [pending, settled, failed]
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque continuation cursor from a previous response's `nextCursor`.
+          schema:
+            type: string
+            maxLength: 512
+      responses:
+        "200":
+          description: A page of settlement records, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettlementListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /healthz:
+    get:
+      operationId: getLiveness
+      tags: [operations]
+      summary: Liveness probe.
+      description: |
+        Returns `200` whenever the process is running and its event loop is responsive. It
+        deliberately performs **no** dependency checks, so a transient Redis or facilitator
+        outage does not get the container killed. Use `/readyz` for traffic gating.
+      responses:
+        "200":
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LivenessStatus"
+              example:
+                status: ok
+                version: 0.1.0
+                uptimeSeconds: 3812
+
+  /readyz:
+    get:
+      operationId: getReadiness
+      tags: [operations]
+      summary: Readiness probe.
+      description: |
+        Returns `200` only when the gateway can actually serve a paid request: configuration
+        loaded, the facilitator reachable and advertising `exact` on the configured network,
+        the registry backend reachable, and at least one healthy node registered. Any failing
+        check yields `503` with the per-check detail, so an operator can see which dependency
+        is at fault without reading logs.
+      responses:
+        "200":
+          description: Ready to serve paid traffic.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessStatus"
+              example:
+                status: ready
+                checks:
+                  - name: config
+                    ok: true
+                  - name: facilitator
+                    ok: true
+                    detail: exact supported on algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k
+                  - name: registry
+                    ok: true
+                  - name: nodes
+                    ok: true
+                    detail: 3 healthy
+        "503":
+          description: At least one dependency is not ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessStatus"
+              example:
+                status: not_ready
+                checks:
+                  - name: config
+                    ok: true
+                  - name: facilitator
+                    ok: true
+                  - name: registry
+                    ok: true
+                  - name: nodes
+                    ok: false
+                    detail: no healthy node is advertising any model
+
+  /.well-known/x402:
+    get:
+      operationId: getX402Discovery
+      tags: [operations]
+      summary: x402 / Bazaar service discovery manifest.
+      description: |
+        Machine-readable advertisement of every paid resource this service exposes, in the
+        shape a Bazaar crawler consumes. `payTo`, `network`, `asset` and `amount` here are the
+        same values the `402` challenge will carry.
+      responses:
+        "200":
+          description: The discovery manifest.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiscoveryManifest"
+
+components:
+  securitySchemes:
+    x402Payment:
+      type: apiKey
+      in: header
+      name: X-PAYMENT
+      description: |
+        Base64 of the JSON `PaymentPayload` defined by x402 v2. Obtain the requirements to sign
+        against from the `402` challenge on the same route. The legacy header name
+        `Payment-Signature` is also accepted on input.
+
+  parameters:
+    XPaymentHeader:
+      name: X-PAYMENT
+      in: header
+      required: false
+      description: |
+        Base64-encoded JSON `PaymentPayload`. Omit it to receive the `402` challenge that
+        describes what to pay.
+      schema:
+        type: string
+        maxLength: 65536
+        contentEncoding: base64
+        contentMediaType: application/json
+        contentSchema:
+          $ref: "#/components/schemas/PaymentPayload"
+    NodeIdPath:
+      name: nodeId
+      in: path
+      required: true
+      description: The node's stable, operator-chosen identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+      example: gpu-fra-01
+
+  headers:
+    PaymentResponse:
+      description: |
+        Base64-encoded JSON `SettleResponse` for the inbound leg, including the confirmed
+        Algorand transaction id.
+      schema:
+        type: string
+        contentEncoding: base64
+        contentMediaType: application/json
+        contentSchema:
+          $ref: "#/components/schemas/SettleResponse"
+    MeshNodeId:
+      description: Identifier of the node that served this request.
+      schema:
+        type: string
+        maxLength: 128
+    MeshRequestId:
+      description: Correlation id shared by logs, traces and the settlement record.
+      schema:
+        type: string
+        maxLength: 128
+    MeshRouteReason:
+      description: Human-readable explanation of why the router picked this node.
+      schema:
+        type: string
+        maxLength: 512
+
+  responses:
+    PaymentRequired:
+      description: |
+        No usable `X-PAYMENT` header was supplied, or the payment failed verification. The body
+        states exactly what to pay, to whom, on which chain, and in which asset.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PaymentRequired"
+          examples:
+            missingPayment:
+              summary: First call — no payment attached (Algorand MainNet, $0.0020 USDC)
+              value:
+                x402Version: 2
+                error: X-PAYMENT header is required
+                resource:
+                  url: https://mesh.example.com/v1/chat/completions
+                  description:
+                    Pay-per-prompt OpenAI-compatible LLM inference routed to community GPU
+                    nodes.
+                  mimeType: application/json
+                  serviceName: x402 Mesh Inference
+                  tags:
+                    - ai
+                    - inference
+                    - llm
+                    - algorand
+                    - x402-global-challenge
+                accepts:
+                  - scheme: exact
+                    network: algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k
+                    asset: "31566704"
+                    amount: "2000"
+                    payTo: MESHA65YISXOIW6STKMGJ5AFBZK2UJQNHR3LQZPG2LHIRB4YBPFJPT5WGU
+                    maxTimeoutSeconds: 120
+                    extra:
+                      name: USDC
+                      decimals: 6
+                      feePayer: ZMFK2OI7ZBD2U27ISERZC4S6LKM6WMFJPZQ4MYNJDZ2VNBNMBA67RA22AA
+                extensions:
+                  bazaar:
+                    info:
+                      input:
+                        type: http
+                        method: POST
+                        bodyType: json
+                        body:
+                          model: llama3.1:8b
+                          messages:
+                            - role: user
+                              content: Explain the x402 protocol in one sentence.
+                      output:
+                        type: application/json
+                        example:
+                          id: chatcmpl-0f3a9c1f5b2e4d7a
+                          object: chat.completion
+                          model: llama3.1:8b
+            rejectedPayment:
+              summary: Payment supplied but rejected by the facilitator
+              value:
+                x402Version: 2
+                error: "payment rejected: insufficient_funds"
+                resource:
+                  url: https://mesh.example.com/v1/chat/completions
+                  serviceName: x402 Mesh Inference
+                accepts:
+                  - scheme: exact
+                    network: algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k
+                    asset: "31566704"
+                    amount: "2000"
+                    payTo: MESHA65YISXOIW6STKMGJ5AFBZK2UJQNHR3LQZPG2LHIRB4YBPFJPT5WGU
+                    maxTimeoutSeconds: 120
+                    extra:
+                      name: USDC
+                      decimals: 6
+                      feePayer: ZMFK2OI7ZBD2U27ISERZC4S6LKM6WMFJPZQ4MYNJDZ2VNBNMBA67RA22AA
+
+    BadRequest:
+      description: The request failed schema or freshness validation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MeshError"
+          example:
+            error:
+              code: validation_error
+              message: invalid chat completion request
+              details:
+                fieldErrors:
+                  messages:
+                    - messages must not be empty
+
+    Unauthorized:
+      description: Ed25519 signature verification failed or the key does not match the address.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MeshError"
+          example:
+            error:
+              code: auth_error
+              message: signature does not verify against operatorAddress
+
+    NotFound:
+      description: No such node.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MeshError"
+          example:
+            error:
+              code: validation_error
+              message: unknown nodeId
+
+    TooManyRequests:
+      description: The caller exceeded its request budget.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MeshError"
+          example:
+            error:
+              code: rate_limited
+              message: too many requests
+
+    NoCapacity:
+      description: No healthy node can serve the requested model right now.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MeshError"
+          example:
+            error:
+              code: no_capacity
+              message: no healthy node advertises model llama3.1:405b
+
+    BadGateway:
+      description: |
+        A downstream dependency failed: the selected node returned an unusable response, or an
+        on-chain settlement leg could not be completed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MeshError"
+          examples:
+            upstream:
+              value:
+                error:
+                  code: upstream_error
+                  message: node returned a malformed completion
+            settlement:
+              value:
+                error:
+                  code: settlement_error
+                  message: operator payout failed
+                  details:
+                    reason: ErrConfirmationFailed
+
+    InternalError:
+      description: Unexpected server-side failure. The message is deliberately opaque.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MeshError"
+          example:
+            error:
+              code: internal_error
+              message: Internal server error
+
+  schemas:
+    MeshError:
+      type: object
+      description: |
+        Uniform error envelope. `code` is a stable machine-readable contract; `details` is
+        sanitized before serialization, so it never contains key material or a stack trace.
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          additionalProperties: false
+          properties:
+            code:
+              type: string
+              enum:
+                - config_error
+                - pricing_error
+                - validation_error
+                - payment_error
+                - settlement_error
+                - no_capacity
+                - upstream_error
+                - auth_error
+                - rate_limited
+                - internal_error
+            message:
+              type: string
+              maxLength: 1024
+            details:
+              type: object
+              additionalProperties: true
+
+    Network:
+      type: string
+      description: |
+        CAIP-2 network identifier. Both Algorand encodings are accepted on input; responses
+        always carry the canonical truncated form.
+      minLength: 3
+      maxLength: 128
+      pattern: "^[a-z0-9-]+:[A-Za-z0-9+/=_-]+$"
+      examples:
+        - algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k
+        - algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe
+        - algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=
+
+    AlgorandAddress:
+      type: string
+      description: 58-character RFC 4648 base32 Algorand address.
+      pattern: "^[A-Z2-7]{58}$"
+      examples:
+        - MESHA65YISXOIW6STKMGJ5AFBZK2UJQNHR3LQZPG2LHIRB4YBPFJPT5WGU
+
+    AtomicAmount:
+      type: string
+      description: |
+        Non-negative integer USDC amount in atomic units (6 decimals) as a decimal string.
+        `"2000"` is $0.0020. Never a float.
+      pattern: "^\\d+$"
+      examples:
+        - "2000"
+        - "1700"
+        - "300"
+
+    UsdcAmount:
+      type: string
+      description: |
+        Non-negative decimal USDC amount with at most 6 fractional digits. Used for
+        human-facing quotes; settlement always uses `AtomicAmount`.
+      pattern: "^\\d+(\\.\\d{1,6})?$"
+      examples:
+        - "0.0020"
+        - "0.000180"
+
+    AssetId:
+      type: string
+      description: |
+        Algorand ASA id as a decimal string. USDC is `31566704` on MainNet and `10458941` on
+        TestNet.
+      pattern: "^\\d+$"
+      examples:
+        - "31566704"
+        - "10458941"
+
+    ResourceInfo:
+      type: object
+      description: Descriptive metadata about the paid resource, echoed in the 402 challenge.
+      required: [url]
+      additionalProperties: false
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+        description:
+          type: string
+          maxLength: 1024
+        mimeType:
+          type: string
+          maxLength: 128
+        serviceName:
+          type: string
+          maxLength: 128
+        tags:
+          type: array
+          maxItems: 16
+          items:
+            type: string
+            maxLength: 64
+        iconUrl:
+          type: string
+          format: uri
+          maxLength: 2048
+
+    PaymentRequirements:
+      type: object
+      description: One acceptable way to pay for the resource.
+      required: [scheme, network, asset, amount, payTo, maxTimeoutSeconds, extra]
+      additionalProperties: false
+      properties:
+        scheme:
+          type: string
+          description: Payment scheme. This gateway only offers `exact`.
+          examples: [exact]
+        network:
+          $ref: "#/components/schemas/Network"
+        asset:
+          $ref: "#/components/schemas/AssetId"
+        amount:
+          $ref: "#/components/schemas/AtomicAmount"
+        payTo:
+          $ref: "#/components/schemas/AlgorandAddress"
+        maxTimeoutSeconds:
+          type: integer
+          description: How long the challenge stays valid for.
+          minimum: 1
+          maximum: 3600
+          examples: [120]
+        extra:
+          type: object
+          description: |
+            Scheme- and chain-specific metadata. On Algorand this carries the asset `name` and
+            `decimals`, plus the facilitator's `feePayer` account, which is what makes the
+            payment gasless for the client.
+          additionalProperties: true
+          properties:
+            name:
+              type: string
+            decimals:
+              type: integer
+            feePayer:
+              $ref: "#/components/schemas/AlgorandAddress"
+
+    PaymentRequired:
+      type: object
+      description: x402 v2 `402` challenge body.
+      required: [x402Version, resource, accepts]
+      additionalProperties: false
+      properties:
+        x402Version:
+          type: integer
+          const: 2
+        error:
+          type: string
+          description: Why the request was not served.
+          maxLength: 1024
+        resource:
+          $ref: "#/components/schemas/ResourceInfo"
+        accepts:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/PaymentRequirements"
+        extensions:
+          type: object
+          description: Protocol extensions; `bazaar` carries the discovery declaration.
+          additionalProperties: true
+
+    ExactAvmPayload:
+      type: object
+      description: |
+        The Algorand-specific body of a `PaymentPayload` for the `exact` scheme. The group is
+        atomic: the facilitator's fee-payer transaction and the client's ASA transfer either
+        both commit or both fail.
+      required: [paymentGroup, paymentIndex]
+      additionalProperties: false
+      properties:
+        paymentGroup:
+          type: array
+          description: Base64 msgpack-encoded transactions forming one atomic group.
+          minItems: 1
+          maxItems: 16
+          items:
+            type: string
+            contentEncoding: base64
+        paymentIndex:
+          type: integer
+          description: Zero-based index of the ASA transfer leg within `paymentGroup`.
+          minimum: 0
+
+    PaymentPayload:
+      type: object
+      description: |
+        Decoded contents of the `X-PAYMENT` header. `accepted` must be byte-identical to one of
+        the `accepts[]` entries from the challenge.
+      required: [x402Version, accepted, payload]
+      additionalProperties: false
+      properties:
+        x402Version:
+          type: integer
+          const: 2
+        resource:
+          $ref: "#/components/schemas/ResourceInfo"
+        accepted:
+          $ref: "#/components/schemas/PaymentRequirements"
+        payload:
+          $ref: "#/components/schemas/ExactAvmPayload"
+        extensions:
+          type: object
+          additionalProperties: true
+
+    SettleResponse:
+      type: object
+      description: Facilitator settlement outcome, as carried base64 in `PAYMENT-RESPONSE`.
+      required: [success, transaction, network]
+      additionalProperties: true
+      properties:
+        success:
+          type: boolean
+        errorReason:
+          type: string
+        errorMessage:
+          type: string
+        payer:
+          $ref: "#/components/schemas/AlgorandAddress"
+        transaction:
+          type: string
+          description: Confirmed Algorand transaction id.
+          maxLength: 128
+        network:
+          $ref: "#/components/schemas/Network"
+        amount:
+          $ref: "#/components/schemas/AtomicAmount"
+
+    NodeCapability:
+      type: object
+      description: One model a node advertises, with its context window and quoted price.
+      required: [model, contextWindow, pricePer1kTokensUsdc]
+      additionalProperties: false
+      properties:
+        model:
+          type: string
+          minLength: 1
+          maxLength: 200
+          examples: [llama3.1:8b]
+        contextWindow:
+          type: integer
+          description: Maximum prompt plus completion tokens accepted for this model.
+          minimum: 1
+          maximum: 10000000
+          examples: [131072]
+        pricePer1kTokensUsdc:
+          $ref: "#/components/schemas/UsdcAmount"
+        quantization:
+          type: string
+          minLength: 1
+          maxLength: 64
+          examples: [q4_K_M]
+
+    NodeRegistration:
+      type: object
+      description: |
+        A node's self-declaration. This exact object — projected onto these eight fields and
+        canonically serialized — is what the operator signs.
+      required:
+        [nodeId, operatorAddress, endpoint, capabilities, network, version, timestamp, nonce]
+      additionalProperties: false
+      properties:
+        nodeId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          examples: [gpu-fra-01]
+        operatorAddress:
+          $ref: "#/components/schemas/AlgorandAddress"
+        endpoint:
+          type: string
+          format: uri
+          description: Absolute http(s) URL the gateway forwards inference requests to.
+          maxLength: 512
+          pattern: "^https?://"
+          examples: [https://node-fra-01.example.com]
+        capabilities:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/NodeCapability"
+        network:
+          $ref: "#/components/schemas/Network"
+        version:
+          type: string
+          minLength: 1
+          maxLength: 32
+          pattern: "^[0-9A-Za-z.+-]+$"
+          examples: [0.1.0]
+        timestamp:
+          type: integer
+          description: |
+            Unix epoch milliseconds at signing time. Must be within 120000 ms of the gateway
+            clock.
+          minimum: 1
+          examples: [1785772800000]
+        nonce:
+          type: string
+          description: Single-use random hex, at least 128 bits.
+          pattern: "^[0-9a-fA-F]{16,128}$"
+          examples: [9f2c1d4e8a7b6053c1e2f4a6b8d0c3e5]
+
+    SignedNodeRegistration:
+      type: object
+      description: A registration plus the Ed25519 proof that the operator key produced it.
+      required: [registration, signature, publicKey]
+      additionalProperties: false
+      properties:
+        registration:
+          $ref: "#/components/schemas/NodeRegistration"
+        signature:
+          type: string
+          description: Base64 Ed25519 signature (64 bytes) over the canonical signing bytes.
+          contentEncoding: base64
+          maxLength: 128
+        publicKey:
+          type: string
+          description: |
+            Base64 Ed25519 public key (32 bytes). Must hash to `registration.operatorAddress`.
+          contentEncoding: base64
+          maxLength: 64
+
+    NodeHeartbeat:
+      type: object
+      description: |
+        Self-reported liveness and load. Signed exactly like a registration but under the
+        `x402-mesh/node-heartbeat/v1` domain.
+      required: [nodeId, inFlight, latencyMsP50, latencyMsP95, timestamp, nonce]
+      additionalProperties: false
+      properties:
+        nodeId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        inFlight:
+          type: integer
+          description: Requests the node is currently serving.
+          minimum: 0
+        latencyMsP50:
+          type: number
+          minimum: 0
+        latencyMsP95:
+          type: number
+          minimum: 0
+        maxConcurrency:
+          type: integer
+          description: Updated concurrency ceiling, when the operator has changed it.
+          minimum: 1
+          maximum: 4096
+        timestamp:
+          type: integer
+          minimum: 1
+        nonce:
+          type: string
+          pattern: "^[0-9a-fA-F]{16,128}$"
+
+    SignedNodeHeartbeat:
+      type: object
+      required: [heartbeat, signature, publicKey]
+      additionalProperties: false
+      properties:
+        heartbeat:
+          $ref: "#/components/schemas/NodeHeartbeat"
+        signature:
+          type: string
+          contentEncoding: base64
+          maxLength: 128
+        publicKey:
+          type: string
+          contentEncoding: base64
+          maxLength: 64
+
+    NodeHealth:
+      type: object
+      description: Rolling liveness and quality signal the registry maintains per node.
+      required:
+        - nodeId
+        - healthy
+        - latencyMsP50
+        - latencyMsP95
+        - inFlight
+        - maxConcurrency
+        - uptimeRatio
+        - qualityScore
+        - consecutiveFailures
+        - lastSeenAt
+      additionalProperties: false
+      properties:
+        nodeId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        healthy:
+          type: boolean
+          description: False once the node trips the failure threshold or misses heartbeats.
+        latencyMsP50:
+          type: number
+          minimum: 0
+        latencyMsP95:
+          type: number
+          minimum: 0
+        inFlight:
+          type: integer
+          minimum: 0
+        maxConcurrency:
+          type: integer
+          minimum: 1
+          maximum: 4096
+        uptimeRatio:
+          type: number
+          description: Fraction of heartbeat windows the node was reachable.
+          minimum: 0
+          maximum: 1
+        qualityScore:
+          type: number
+          description: Composite routing score; higher is better.
+          minimum: 0
+          maximum: 1
+        consecutiveFailures:
+          type: integer
+          minimum: 0
+        lastSeenAt:
+          type: integer
+          description: Unix epoch milliseconds of the last successful heartbeat.
+          minimum: 0
+
+    NodeRecord:
+      type: object
+      description: Everything the registry stores about a node.
+      required: [registration, health, usdcOptedIn, totalRequests, totalPaidAtomic, registeredAt]
+      additionalProperties: false
+      properties:
+        registration:
+          $ref: "#/components/schemas/NodeRegistration"
+        health:
+          $ref: "#/components/schemas/NodeHealth"
+        usdcOptedIn:
+          type: boolean
+          description: |
+            Verified on chain: the operator address holds the USDC ASA. A node without the
+            opt-in cannot receive a payout, so it is not routable while
+            `MESH_REQUIRE_USDC_OPT_IN` is enabled.
+        totalRequests:
+          type: integer
+          minimum: 0
+        totalPaidAtomic:
+          $ref: "#/components/schemas/AtomicAmount"
+        registeredAt:
+          type: integer
+          minimum: 0
+
+    NodeSelection:
+      type: object
+      description: Router output — the chosen node plus why it won.
+      required: [node, score, reason]
+      additionalProperties: false
+      properties:
+        node:
+          $ref: "#/components/schemas/NodeRecord"
+        score:
+          type: number
+        reason:
+          type: string
+          maxLength: 512
+          examples: [highest quality score among 3 nodes serving llama3.1:8b]
+
+    NodeListResponse:
+      type: object
+      required: [nodes, count]
+      additionalProperties: false
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeRecord"
+        count:
+          type: integer
+          description: Number of nodes in `nodes`.
+          minimum: 0
+        selection:
+          description: |
+            Present only when the `model` query parameter was supplied and at least one node
+            can serve it: the node the router would pick right now, and why. Purely
+            informational — routing is re-evaluated at request time.
+          $ref: "#/components/schemas/NodeSelection"
+
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant]
+        content:
+          type: string
+
+    ChatCompletionRequest:
+      type: object
+      description: |
+        OpenAI-compatible request. Unknown properties are ignored rather than rejected, so
+        drop-in OpenAI SDK clients work unchanged.
+      required: [model, messages]
+      additionalProperties: true
+      properties:
+        model:
+          type: string
+          minLength: 1
+          maxLength: 200
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 512
+          items:
+            $ref: "#/components/schemas/ChatMessage"
+        stream:
+          type: boolean
+          description: When true the response is `text/event-stream`.
+          default: false
+        max_tokens:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+        top_p:
+          type: number
+          minimum: 0
+          maximum: 1
+        stop:
+          type: array
+          maxItems: 4
+          items:
+            type: string
+
+    ChatCompletionUsage:
+      type: object
+      required: [prompt_tokens, completion_tokens, total_tokens]
+      properties:
+        prompt_tokens:
+          type: integer
+          minimum: 0
+        completion_tokens:
+          type: integer
+          minimum: 0
+        total_tokens:
+          type: integer
+          minimum: 0
+
+    ChatCompletionChoice:
+      type: object
+      required: [index, message, finish_reason]
+      properties:
+        index:
+          type: integer
+          minimum: 0
+        message:
+          $ref: "#/components/schemas/ChatMessage"
+        finish_reason:
+          type: [string, "null"]
+          examples: [stop, length]
+
+    ChatCompletionResponse:
+      type: object
+      required: [id, object, created, model, choices, usage]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        object:
+          type: string
+          const: chat.completion
+        created:
+          type: integer
+          description: Unix epoch seconds.
+          minimum: 0
+        model:
+          type: string
+          minLength: 1
+        choices:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatCompletionChoice"
+        usage:
+          $ref: "#/components/schemas/ChatCompletionUsage"
+
+    ChatCompletionChunkChoice:
+      type: object
+      required: [index, delta, finish_reason]
+      properties:
+        index:
+          type: integer
+          minimum: 0
+        delta:
+          type: object
+          description: Partial `ChatMessage`; either field may be absent on any given frame.
+          properties:
+            role:
+              type: string
+              enum: [system, user, assistant]
+            content:
+              type: string
+        finish_reason:
+          type: [string, "null"]
+
+    ChatCompletionChunk:
+      type: object
+      description: One SSE frame of a streamed completion.
+      required: [id, object, created, model, choices]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        object:
+          type: string
+          const: chat.completion.chunk
+        created:
+          type: integer
+          minimum: 0
+        model:
+          type: string
+          minLength: 1
+        choices:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatCompletionChunkChoice"
+
+    SettlementRecord:
+      type: object
+      description: |
+        Audit trail for one request's two-legged settlement. The invariant
+        `inboundAtomic - payoutAtomic == marginAtomic` holds, with all three legs non-negative.
+      required:
+        - requestId
+        - nodeId
+        - payerAddress
+        - operatorAddress
+        - inboundAtomic
+        - payoutAtomic
+        - marginAtomic
+        - inboundTxId
+        - payoutTxId
+        - status
+        - createdAt
+        - settledAt
+      additionalProperties: false
+      properties:
+        requestId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        nodeId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        payerAddress:
+          $ref: "#/components/schemas/AlgorandAddress"
+        operatorAddress:
+          $ref: "#/components/schemas/AlgorandAddress"
+        inboundAtomic:
+          $ref: "#/components/schemas/AtomicAmount"
+        payoutAtomic:
+          $ref: "#/components/schemas/AtomicAmount"
+        marginAtomic:
+          $ref: "#/components/schemas/AtomicAmount"
+        inboundTxId:
+          type: string
+          description: Confirmed inbound (client to gateway) Algorand transaction id.
+          minLength: 1
+          maxLength: 128
+        payoutTxId:
+          type: [string, "null"]
+          description: Confirmed payout (gateway to operator) transaction id; null until settled.
+          maxLength: 128
+        status:
+          type: string
+          enum: [pending, settled, failed]
+        error:
+          type: string
+          description: Operator-actionable failure reason when `status` is `failed`.
+          maxLength: 1024
+        createdAt:
+          type: integer
+          minimum: 0
+        settledAt:
+          type: [integer, "null"]
+          minimum: 0
+
+    SettlementListResponse:
+      type: object
+      required: [settlements, count, nextCursor]
+      additionalProperties: false
+      properties:
+        settlements:
+          type: array
+          items:
+            $ref: "#/components/schemas/SettlementRecord"
+        count:
+          type: integer
+          minimum: 0
+        nextCursor:
+          type: [string, "null"]
+          description: Pass back as `cursor` to fetch the next page; null when exhausted.
+          maxLength: 512
+      examples:
+        - settlements:
+            - requestId: req_0f3a9c1f5b2e4d7a
+              nodeId: gpu-fra-01
+              payerAddress: PAYRUOOKGXGAJQQI4VOBPNTX22543MDFNIXHFCXLSW7RAB5DJNEQGGQ65A
+              operatorAddress: NODEWLBKFSOJUCIZHMWSFMPXWQOITEQAKRR4DOLCIWXSBLOHTMEGYXM57Y
+              inboundAtomic: "2000"
+              payoutAtomic: "1700"
+              marginAtomic: "300"
+              inboundTxId: 7VQ2XW3JQ5LZ4YB6N7RPCTKME3H2VZQ5D4WJXBQKLM6UZ3RTGXHA
+              payoutTxId: J3K6QW5ZP2N4LT7YBVXR8CDMEH2QZ5A4WJXBQKLM6UZ3RTGXHB2C
+              status: settled
+              createdAt: 1785772800000
+              settledAt: 1785772804120
+          count: 1
+          nextCursor: null
+
+    LivenessStatus:
+      type: object
+      required: [status, version, uptimeSeconds]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          const: ok
+        version:
+          type: string
+          maxLength: 32
+        uptimeSeconds:
+          type: integer
+          minimum: 0
+
+    ReadinessCheck:
+      type: object
+      required: [name, ok]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          enum: [config, facilitator, registry, nodes]
+        ok:
+          type: boolean
+        detail:
+          type: string
+          maxLength: 512
+
+    ReadinessStatus:
+      type: object
+      required: [status, checks]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        checks:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/ReadinessCheck"
+
+    DiscoveryResource:
+      type: object
+      description: |
+        One paid resource, in the shape a Bazaar crawler consumes. Key names mirror the
+        `DiscoveryResource` type exported by `@x402/extensions/bazaar`.
+      required: [resource, type, x402Version, accepts, lastUpdated]
+      additionalProperties: false
+      properties:
+        resource:
+          type: string
+          format: uri
+          description: Absolute URL of the paid resource.
+          maxLength: 2048
+        type:
+          type: string
+          description: Protocol type of the resource.
+          enum: [http, mcp]
+        x402Version:
+          type: integer
+          const: 2
+        accepts:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/PaymentRequirements"
+        lastUpdated:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp of the last manifest update.
+        description:
+          type: string
+          maxLength: 1024
+        mimeType:
+          type: string
+          maxLength: 128
+        serviceName:
+          type: string
+          maxLength: 128
+        tags:
+          type: array
+          description: |
+            Short, lowercase, hyphenated topical tags. Must include
+            `x402-global-challenge`.
+          maxItems: 16
+          items:
+            type: string
+            maxLength: 64
+        iconUrl:
+          type: string
+          format: uri
+          maxLength: 2048
+        extensions:
+          type: object
+          description: Extension payloads echoed from discovery, keyed by extension name.
+          additionalProperties: true
+
+    DiscoveryManifest:
+      type: object
+      description: Body served at `/.well-known/x402`.
+      required: [x402Version, items]
+      additionalProperties: true
+      properties:
+        x402Version:
+          type: integer
+          const: 2
+        serviceName:
+          type: string
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 1024
+        iconUrl:
+          type: string
+          format: uri
+          maxLength: 2048
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/DiscoveryResource"

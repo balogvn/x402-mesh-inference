@@ -1,0 +1,257 @@
+name: deploy
+
+# Runs on a manual dispatch, or automatically once ci-test goes green on main. Keying the
+# automatic path off `workflow_run` rather than off `push` is deliberate: it means main is only
+# ever deployed from a commit whose tests actually passed, instead of racing them.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deployment target.
+        type: choice
+        required: true
+        default: staging
+        options: [staging, production]
+      image_tag:
+        description: Extra tag to publish alongside the commit SHA.
+        type: string
+        required: false
+        default: latest
+      skip_deploy:
+        description: Build and push the images but do not roll them out.
+        type: boolean
+        required: false
+        default: false
+  workflow_run:
+    workflows: [ci-test]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # One rollout at a time per target. Cancelling a half-finished deploy is worse than queuing.
+  group: deploy-${{ github.event.inputs.environment || 'staging' }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    name: build and push images
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The automatic path must only fire for a green ci-test run. `workflow_run` fires on every
+    # completion, including failures and cancellations.
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      gateway_image: ${{ steps.meta.outputs.gateway_image }}
+      daemon_image: ${{ steps.meta.outputs.daemon_image }}
+      sha: ${{ steps.meta.outputs.sha }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # For the workflow_run path, build exactly the commit that passed ci-test, not
+          # whatever happens to be at the head of main by the time this starts.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Resolve image names
+        id: meta
+        run: |
+          sha="${{ github.event.workflow_run.head_sha || github.sha }}"
+          ns=$(echo "${IMAGE_NAMESPACE}" | tr '[:upper:]' '[:lower:]')
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "gateway_image=${REGISTRY}/${ns}/gateway" >> "$GITHUB_OUTPUT"
+          echo "daemon_image=${REGISTRY}/${ns}/node-daemon" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # GITHUB_TOKEN is always present in the base repository and carries `packages: write`
+      # because this job requests it. No configured secret is required for the registry login.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the gateway image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.gateway
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ${{ steps.meta.outputs.gateway_image }}:${{ steps.meta.outputs.sha }}
+            ${{ steps.meta.outputs.gateway_image }}:${{ github.event.inputs.image_tag || 'latest' }}
+          cache-from: type=gha,scope=gateway
+          cache-to: type=gha,mode=max,scope=gateway
+
+      - name: Build and push the node daemon image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.node-daemon
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ${{ steps.meta.outputs.daemon_image }}:${{ steps.meta.outputs.sha }}
+            ${{ steps.meta.outputs.daemon_image }}:${{ github.event.inputs.image_tag || 'latest' }}
+          cache-from: type=gha,scope=node-daemon
+          cache-to: type=gha,mode=max,scope=node-daemon
+
+      # Catches a broken image before it is ever rolled out: the gateway must start, refuse to
+      # run without configuration, and answer /healthz once configured.
+      - name: Smoke-test the gateway image
+        env:
+          GATEWAY_IMAGE: ${{ steps.meta.outputs.gateway_image }}:${{ steps.meta.outputs.sha }}
+        run: |
+          docker run --rm -d --name gateway-smoke -p 8402:8402 \
+            -e HOST=0.0.0.0 \
+            -e PORT=8402 \
+            -e MESH_NETWORK=testnet \
+            -e X402_PAY_TO_ADDRESS=MESHA65YISXOIW6STKMGJ5AFBZK2UJQNHR3LQZPG2LHIRB4YBPFJPT5WGU \
+            -e MESH_REQUIRE_USDC_OPT_IN=false \
+            "${GATEWAY_IMAGE}"
+          ok=0
+          for i in $(seq 1 45); do
+            if curl -fsS --max-time 2 http://127.0.0.1:8402/healthz >/dev/null 2>&1; then
+              echo "image answered /healthz after ${i} attempt(s)."
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::the gateway image never answered /healthz"
+            docker logs gateway-smoke || true
+          fi
+          docker rm -f gateway-smoke >/dev/null 2>&1 || true
+          [ "$ok" -eq 1 ]
+
+  deploy:
+    name: roll out (${{ github.event.inputs.environment || 'staging' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build-and-push
+    if: ${{ github.event.inputs.skip_deploy != 'true' }}
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+
+    # Every one of these is optional. `secrets` cannot be read from an `if:` expression, so they
+    # are lifted into the job environment and each step is gated on the env value being
+    # non-empty. A fork, or a repository that has not configured deployment yet, sees a clean
+    # skip instead of a red run.
+    env:
+      DEPLOY_WEBHOOK_URL: ${{ secrets.DEPLOY_WEBHOOK_URL }}
+      DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+      MESH_PUBLIC_BASE_URL: ${{ secrets.MESH_PUBLIC_BASE_URL }}
+
+    steps:
+      - name: Report what will be deployed
+        run: |
+          echo "gateway image : ${{ needs.build-and-push.outputs.gateway_image }}:${{ needs.build-and-push.outputs.sha }}"
+          echo "daemon image  : ${{ needs.build-and-push.outputs.daemon_image }}:${{ needs.build-and-push.outputs.sha }}"
+          echo "environment   : ${{ github.event.inputs.environment || 'staging' }}"
+
+      - name: Deployment is not configured
+        if: ${{ env.DEPLOY_WEBHOOK_URL == '' }}
+        run: |
+          echo "::notice::DEPLOY_WEBHOOK_URL is not set, so nothing was rolled out. The images"
+          echo "::notice::above were built and pushed to GHCR and can be deployed by hand."
+
+      # The rollout itself is a single authenticated HTTPS call to whatever runs the target
+      # (a PaaS deploy hook, a webhook on the host, an internal control plane). The token is
+      # sent in an Authorization header and never on the command line or in a log line.
+      - name: Trigger the rollout over HTTPS
+        if: ${{ env.DEPLOY_WEBHOOK_URL != '' }}
+        run: |
+          if [ -z "${DEPLOY_TOKEN}" ]; then
+            echo "::error::DEPLOY_WEBHOOK_URL is set but DEPLOY_TOKEN is not; refusing to call it unauthenticated"
+            exit 1
+          fi
+          case "${DEPLOY_WEBHOOK_URL}" in
+            https://*) ;;
+            *) echo "::error::DEPLOY_WEBHOOK_URL must be https://"; exit 1 ;;
+          esac
+          payload=$(node -e '
+            process.stdout.write(JSON.stringify({
+              environment: process.env.TARGET_ENVIRONMENT,
+              commit: process.env.TARGET_SHA,
+              images: {
+                gateway: process.env.GATEWAY_IMAGE,
+                nodeDaemon: process.env.DAEMON_IMAGE,
+              },
+            }));
+          ')
+          status=$(printf "%s" "$payload" | curl -sS -o response.json -w "%{http_code}" \
+            --max-time 120 \
+            -X POST "${DEPLOY_WEBHOOK_URL}" \
+            -H "Authorization: Bearer ${DEPLOY_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-binary @-)
+          echo "deploy hook responded ${status}"
+          head -c 2000 response.json || true
+          case "${status}" in
+            2*) ;;
+            *) echo "::error::deploy hook returned HTTP ${status}"; exit 1 ;;
+          esac
+        env:
+          TARGET_ENVIRONMENT: ${{ github.event.inputs.environment || 'staging' }}
+          TARGET_SHA: ${{ needs.build-and-push.outputs.sha }}
+          GATEWAY_IMAGE: ${{ needs.build-and-push.outputs.gateway_image }}:${{ needs.build-and-push.outputs.sha }}
+          DAEMON_IMAGE: ${{ needs.build-and-push.outputs.daemon_image }}:${{ needs.build-and-push.outputs.sha }}
+
+      # A rollout that returns 200 and then serves 503 is not a successful rollout. /readyz is
+      # the gateway's own answer to "can I take a paid request right now".
+      - name: Verify the deployment is ready
+        if: ${{ env.DEPLOY_WEBHOOK_URL != '' && env.MESH_PUBLIC_BASE_URL != '' }}
+        run: |
+          base="${MESH_PUBLIC_BASE_URL%/}"
+          for i in $(seq 1 60); do
+            if curl -fsS --max-time 5 "${base}/readyz" > readyz.json 2>/dev/null; then
+              echo "ready after ${i} attempt(s):"
+              cat readyz.json
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::${base}/readyz never returned 200 after the rollout"
+          curl -sS --max-time 5 "${base}/readyz" || true
+          exit 1
+
+      # The mandatory discovery tag is what makes the service findable. It is cheap to assert
+      # here and expensive to discover was missing after judging has closed.
+      - name: Verify the served discovery manifest
+        if: ${{ env.DEPLOY_WEBHOOK_URL != '' && env.MESH_PUBLIC_BASE_URL != '' }}
+        run: |
+          base="${MESH_PUBLIC_BASE_URL%/}"
+          curl -fsS --max-time 10 "${base}/.well-known/x402" > manifest.json
+          node -e '
+            const m = require("./manifest.json");
+            const item = m.items?.[0] ?? {};
+            const tags = item.tags ?? [];
+            const accepts = item.accepts?.[0] ?? {};
+            const problems = [];
+            if (!tags.includes("x402-global-challenge")) problems.push("missing the x402-global-challenge tag");
+            if (accepts.scheme !== "exact") problems.push(`scheme is ${accepts.scheme}`);
+            if (!String(accepts.network ?? "").startsWith("algorand:")) problems.push(`network is ${accepts.network}`);
+            if (!/^[0-9]+$/.test(String(accepts.amount ?? ""))) problems.push(`amount ${accepts.amount} is not atomic units`);
+            for (const p of problems) console.error(`::error::served manifest ${p}`);
+            if (problems.length > 0) process.exit(1);
+            console.log(`served manifest OK: ${accepts.amount} atomic of asset ${accepts.asset} on ${accepts.network}`);
+          '

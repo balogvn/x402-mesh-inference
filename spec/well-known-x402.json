@@ -1,0 +1,123 @@
+{
+  "$comment": "Template for the body served at GET /.well-known/x402. At serve time the gateway substitutes the deployment's own values: every `https://mesh.example.com` origin comes from MESH_PUBLIC_BASE_URL, `accepts[].payTo` comes from X402_PAY_TO_ADDRESS, `accepts[].network` and `accepts[].asset` come from the configured network via avm.USDC_CONFIG, and `lastUpdated` is stamped at boot. The address below is a syntactically valid but deliberately unfunded placeholder - do not pay it. NOTE: the Bazaar sanitizer keeps at most the FIRST 5 tags, so `x402-global-challenge` is listed first on purpose.",
+  "x402Version": 2,
+  "serviceName": "x402 Mesh Inference",
+  "description": "Decentralized pay-per-prompt AI inference. An OpenAI-compatible chat completions endpoint that charges $0.0020 USDC per request over x402 on Algorand and routes the prompt to a community GPU node, paying that node's operator $0.0017 USDC per served request.",
+  "iconUrl": "https://raw.githubusercontent.com/balogvn/x402-mesh-inference/main/docs/icon.png",
+  "items": [
+    {
+      "resource": "https://mesh.example.com/v1/chat/completions",
+      "type": "http",
+      "x402Version": 2,
+      "accepts": [
+        {
+          "scheme": "exact",
+          "network": "algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k",
+          "asset": "31566704",
+          "amount": "2000",
+          "payTo": "MESHA65YISXOIW6STKMGJ5AFBZK2UJQNHR3LQZPG2LHIRB4YBPFJPT5WGU",
+          "maxTimeoutSeconds": 120,
+          "extra": {
+            "name": "USDC",
+            "decimals": 6,
+            "feePayer": "ZMFK2OI7ZBD2U27ISERZC4S6LKM6WMFJPZQ4MYNJDZ2VNBNMBA67RA22AA"
+          }
+        }
+      ],
+      "lastUpdated": "2026-07-31T00:00:00.000Z",
+      "description": "OpenAI-compatible chat completion. Pay $0.0020 USDC (2000 atomic units, 6 decimals) per request; the gateway routes the prompt to the healthiest node advertising the requested model. Set \"stream\": true for a text/event-stream response.",
+      "mimeType": "application/json",
+      "serviceName": "x402 Mesh Inference",
+      "tags": ["x402-global-challenge", "ai", "inference", "llm", "algorand"],
+      "iconUrl": "https://raw.githubusercontent.com/balogvn/x402-mesh-inference/main/docs/icon.png",
+      "extensions": {
+        "bazaar": {
+          "info": {
+            "input": {
+              "type": "http",
+              "method": "POST",
+              "bodyType": "json",
+              "body": {
+                "model": "llama3.1:8b",
+                "messages": [
+                  {
+                    "role": "user",
+                    "content": "Explain the x402 protocol in one sentence."
+                  }
+                ],
+                "max_tokens": 256,
+                "stream": false
+              }
+            },
+            "output": {
+              "type": "json",
+              "example": {
+                "id": "chatcmpl-0f3a9c1f5b2e4d7a",
+                "object": "chat.completion",
+                "created": 1785772800,
+                "model": "llama3.1:8b",
+                "choices": [
+                  {
+                    "index": 0,
+                    "message": {
+                      "role": "assistant",
+                      "content": "x402 turns HTTP 402 into a working payment handshake."
+                    },
+                    "finish_reason": "stop"
+                  }
+                ],
+                "usage": {
+                  "prompt_tokens": 24,
+                  "completion_tokens": 12,
+                  "total_tokens": 36
+                }
+              }
+            }
+          },
+          "routeTemplate": "/v1/chat/completions",
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+              "input": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "http"
+                  },
+                  "method": {
+                    "type": "string",
+                    "enum": ["POST", "PUT", "PATCH"]
+                  },
+                  "bodyType": {
+                    "type": "string",
+                    "enum": ["json", "form-data", "text"]
+                  },
+                  "body": {
+                    "properties": {}
+                  }
+                },
+                "required": ["type", "method", "bodyType", "body"],
+                "additionalProperties": false
+              },
+              "output": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string"
+                  },
+                  "example": {
+                    "type": "object"
+                  }
+                },
+                "required": ["type"]
+              }
+            },
+            "required": ["input"]
+          }
+        }
+      }
+    }
+  ]
+}

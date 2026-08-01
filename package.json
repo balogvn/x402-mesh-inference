@@ -1,0 +1,47 @@
+{
+  "name": "x402-mesh-inference",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Decentralized pay-per-prompt AI compute routing marketplace on Algorand x402",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "clean": "rm -rf packages/*/dist packages/*/*.tsbuildinfo",
+    "typecheck": "tsc --build --force && tsc -p tsconfig.tests.json && tsc -p scripts/tsconfig.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write \"**/*.{ts,js,mjs,json,md,yaml,yml}\"",
+    "format:check": "prettier --check \"**/*.{ts,js,mjs,json,md,yaml,yml}\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "dev:gateway": "npm run dev --workspace @x402-mesh/gateway",
+    "dev:daemon": "npm run dev --workspace @x402-mesh/node-daemon",
+    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test",
+    "test:e2e-mainnet": "tsx scripts/e2e-mainnet.ts",
+    "keygen": "tsx scripts/keygen.ts",
+    "preflight": "tsx scripts/preflight.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.24.0",
+    "@types/node": "^22.13.4",
+    "@typescript-eslint/eslint-plugin": "^8.29.1",
+    "@typescript-eslint/parser": "^8.29.1",
+    "@vitest/coverage-v8": "^3.0.5",
+    "eslint": "^9.24.0",
+    "eslint-config-prettier": "^10.1.1",
+    "globals": "^16.0.0",
+    "prettier": "3.5.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.29.1",
+    "vitest": "^3.0.5"
+  }
+}

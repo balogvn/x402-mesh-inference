@@ -1,0 +1,107 @@
+# syntax=docker/dockerfile:1.7
+#
+# x402 Mesh Inference — gateway image.
+#
+# Build from the repository root:
+#   docker build -f docker/Dockerfile.gateway -t x402-mesh-gateway .
+#
+# Four stages. The point of the split is that the final image contains the compiled JavaScript
+# and the production dependency tree, and nothing else: no TypeScript, no test runner, no
+# eslint, no source. Smaller to pull, and far less to audit.
+
+ARG NODE_VERSION=22-alpine
+
+# ---------------------------------------------------------------------------------------------
+# base — shared settings for every node stage
+# ---------------------------------------------------------------------------------------------
+FROM node:${NODE_VERSION} AS base
+ENV NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+WORKDIR /app
+
+# ---------------------------------------------------------------------------------------------
+# deps — the full workspace dependency tree, cached on the manifests alone
+#
+# Only package manifests are copied here, so this layer is reused across every source-only
+# change. `npm ci` and not `npm install`: it installs exactly package-lock.json and fails if the
+# lockfile has drifted, which is precisely the guarantee an image build should give.
+# ---------------------------------------------------------------------------------------------
+FROM base AS deps
+COPY package.json package-lock.json ./
+COPY packages/shared/package.json packages/shared/package.json
+COPY packages/registry/package.json packages/registry/package.json
+COPY packages/gateway/package.json packages/gateway/package.json
+COPY packages/node-daemon/package.json packages/node-daemon/package.json
+RUN --mount=type=cache,target=/root/.npm npm ci
+
+# ---------------------------------------------------------------------------------------------
+# build — compile the TypeScript project references
+# ---------------------------------------------------------------------------------------------
+FROM deps AS build
+COPY tsconfig.base.json tsconfig.json ./
+COPY packages ./packages
+RUN npm run build
+
+# ---------------------------------------------------------------------------------------------
+# prod-deps — the runtime dependency tree only
+#
+# Resolved from the same lockfile as `deps`, so the runtime tree is a strict subset of what was
+# built and tested against; it is not a second, differently-resolved install.
+# ---------------------------------------------------------------------------------------------
+FROM base AS prod-deps
+COPY package.json package-lock.json ./
+COPY packages/shared/package.json packages/shared/package.json
+COPY packages/registry/package.json packages/registry/package.json
+COPY packages/gateway/package.json packages/gateway/package.json
+COPY packages/node-daemon/package.json packages/node-daemon/package.json
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev
+
+# ---------------------------------------------------------------------------------------------
+# runtime — what actually ships
+# ---------------------------------------------------------------------------------------------
+FROM node:${NODE_VERSION} AS runtime
+
+# tini reaps zombies and forwards SIGTERM, so `docker stop` and a Kubernetes rolling update
+# actually terminate the process instead of waiting out the grace period and killing it.
+RUN apk add --no-cache tini
+
+ENV NODE_ENV=production \
+    PORT=8402 \
+    HOST=0.0.0.0 \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+WORKDIR /app
+
+# The `node` user (uid 1000) ships with the official image. Running as root inside a container
+# that terminates untrusted HTTP traffic is a needless risk, and this process needs nothing that
+# root provides.
+COPY --chown=node:node package.json ./
+COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/packages/shared/package.json ./packages/shared/package.json
+COPY --from=build --chown=node:node /app/packages/shared/dist ./packages/shared/dist
+COPY --from=build --chown=node:node /app/packages/registry/package.json ./packages/registry/package.json
+COPY --from=build --chown=node:node /app/packages/registry/dist ./packages/registry/dist
+COPY --from=build --chown=node:node /app/packages/gateway/package.json ./packages/gateway/package.json
+COPY --from=build --chown=node:node /app/packages/gateway/dist ./packages/gateway/dist
+
+# `npm ci` linked every workspace into node_modules, but this image ships only the three the
+# gateway actually imports. Left in place the rest would be dangling symlinks — inert to node's
+# resolver, but noise for image scanners and a confusing thing to find at 3am.
+RUN rm -rf node_modules/@x402-mesh/node-daemon
+
+USER node
+EXPOSE 8402
+
+# /healthz is liveness only: it deliberately performs no dependency checks, so a transient
+# Redis or facilitator outage does not get a healthy container killed. Readiness gating belongs
+# to the orchestrator's own probe against /readyz.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8402)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "--enable-source-maps", "packages/gateway/dist/server.js"]
+
+LABEL org.opencontainers.image.title="x402 Mesh Inference Gateway" \
+      org.opencontainers.image.description="Pay-per-prompt OpenAI-compatible inference gateway settled in USDC on Algorand via x402." \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/balogvn/x402-mesh-inference"

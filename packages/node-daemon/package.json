@@ -1,0 +1,28 @@
+{
+  "name": "@x402-mesh/node-daemon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "x402-mesh-node": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "dev": "tsx watch src/cli.ts",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@algorandfoundation/algokit-utils": "10.0.0-alpha.46",
+    "@x402-mesh/shared": "0.1.0",
+    "@x402/avm": "^2.20.0",
+    "commander": "^13.1.0",
+    "pino": "^9.6.0",
+    "zod": "^3.24.2"
+  }
+}

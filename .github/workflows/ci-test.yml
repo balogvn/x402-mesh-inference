@@ -1,0 +1,156 @@
+name: ci-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only by default. Nothing in this workflow needs write access, and a workflow that cannot
+# write cannot be turned into a foothold by a compromised dependency.
+permissions:
+  contents: read
+
+# A newer push to the same ref makes the older run pointless. Never cancel on main, so the
+# commit deploy.yml keys off always has a completed run.
+concurrency:
+  group: ci-test-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  npm_config_fund: "false"
+  npm_config_audit: "false"
+
+jobs:
+  verify:
+    name: verify (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      # Run every matrix leg even when one fails: "broken on 20, fine on 22" is exactly the
+      # signal a version matrix exists to produce, and fail-fast throws it away.
+      fail-fast: false
+      matrix:
+        node: ["20.11", "22"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `npm ci`, never `npm install`: it installs exactly package-lock.json and fails when the
+      # lockfile and the manifests have drifted, which is one of the things CI is here to catch.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck packages
+        run: npm run typecheck
+
+      # `npm run typecheck` is `tsc --build` over the package project references, which do not
+      # include scripts/. Without this step a type error in an operator script ships unnoticed.
+      - name: Typecheck scripts
+        run: npx tsc -p scripts/tsconfig.json
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm run test
+
+      # Validates spec/openapi.yaml, spec/well-known-x402.json, spec/llms.txt, and that
+      # .env.example still satisfies both real configuration loaders. Every failure mode these
+      # cover is silent at runtime, so nothing else in the suite would catch them.
+      - name: Validate contract artefacts
+        run: npx tsx scripts/validate-spec.ts
+
+      # Runs entirely in-process when no secrets are present: it boots a stub gateway and a mock
+      # inference node, then asserts the real 402 -> pay -> route -> stream -> split loop against
+      # the real shared schemas, signing and money code. That is what keeps this pipeline
+      # meaningful on a fork that has no secrets at all.
+      - name: End-to-end simulation (stub mode)
+        run: npx tsx scripts/e2e-simulate.ts
+
+      # Proves the operator tooling still starts and that its guards hold. `e2e-mainnet.ts`
+      # spends real money and is deliberately never executed past its guard.
+      - name: Operator scripts respond to --help
+        run: |
+          npx tsx scripts/keygen.ts --help
+          npx tsx scripts/preflight.ts --help
+          npx tsx scripts/validate-spec.ts --help
+          npx tsx scripts/e2e-simulate.ts --help
+          npx tsx scripts/e2e-mainnet.ts --help
+
+      - name: Mainnet script refuses to run without confirmation
+        run: |
+          set +e
+          npx tsx scripts/e2e-mainnet.ts >/dev/null 2>&1
+          code=$?
+          set -e
+          if [ "$code" -ne 2 ]; then
+            echo "::error::e2e-mainnet.ts must exit 2 without X402_MAINNET_CONFIRM, got $code"
+            exit 1
+          fi
+          echo "e2e-mainnet.ts correctly refused to run (exit 2)."
+
+      - name: Preflight fails cleanly on an unconfigured environment
+        run: |
+          set +e
+          env -u X402_PAY_TO_ADDRESS npx tsx scripts/preflight.ts --skip-chain >/dev/null 2>&1
+          code=$?
+          set -e
+          if [ "$code" -ne 1 ]; then
+            echo "::error::preflight.ts must exit 1 without X402_PAY_TO_ADDRESS, got $code"
+            exit 1
+          fi
+          echo "preflight.ts correctly reported the missing configuration (exit 1)."
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # `secrets` is not available inside an `if:` expression, so the token is lifted into the
+    # job environment first and the upload step is gated on that. This is what keeps forks
+    # (which receive no secrets) green instead of red.
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test with coverage
+        run: npm run test:coverage
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: coverage/
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Report coverage to Codecov
+        if: ${{ env.CODECOV_TOKEN != '' }}
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage/lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true

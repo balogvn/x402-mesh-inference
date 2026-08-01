@@ -1,0 +1,259 @@
+name: e2e-x402-simulation
+
+# Proves the whole product loop, not just the units:
+#
+#   402 challenge -> pay -> route to a node -> stream the completion -> split the USDC
+#
+# Two jobs, on purpose:
+#
+#   simulate      runs the harness fully in-process. No services, no secrets, no chain. It is a
+#                 hard requirement and must pass on every pull request, including from forks.
+#   gateway-e2e   boots the real gateway against real Redis and a local algod, registers a mock
+#                 inference node with it, and drives the same assertions over HTTP. With
+#                 AVM_PRIVATE_KEY present it pays through the real facilitator; without it the
+#                 challenge is still validated and the paid legs are reported as skipped, so a
+#                 fork sees an honest green rather than a misleading red.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  npm_config_fund: "false"
+  npm_config_audit: "false"
+
+jobs:
+  simulate:
+    name: in-process simulation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: 402 -> pay -> route -> stream -> split (stub gateway, stub facilitator)
+        run: npx tsx scripts/e2e-simulate.ts --network testnet
+
+  gateway-e2e:
+    name: live gateway
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      # A throwaway Algorand localnet. Nothing in the default (no-secret) path talks to it —
+      # the harness only reaches a chain when AVM_PRIVATE_KEY is set, and then it uses the
+      # public network the gateway is configured for. It is here so that a contributor can point
+      # ALGOD_URL at it for chain-level debugging without changing the workflow.
+      algod:
+        image: algorand/algod:latest
+        env:
+          NETWORK: dev
+          DEV_MODE: "1"
+          START_KMD: "1"
+          TOKEN: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          KMD_TOKEN: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        ports:
+          - 4001:4001
+          - 4002:4002
+
+    env:
+      # `secrets` cannot be referenced from an `if:` expression, so every optional secret is
+      # lifted into the job environment here and the steps that need one are gated on the env
+      # value being non-empty. On a fork these are all empty strings and the job stays green.
+      AVM_PRIVATE_KEY: ${{ secrets.AVM_PRIVATE_KEY }}
+      X402_PAY_TO_ADDRESS_SECRET: ${{ secrets.X402_PAY_TO_ADDRESS }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # Advisory: the localnet is a debugging convenience, not something the assertions depend
+      # on. A flaky upstream image must not turn an otherwise correct pull request red.
+      - name: Wait for the Algorand localnet (advisory)
+        continue-on-error: true
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 3 http://127.0.0.1:4001/health >/dev/null 2>&1; then
+              echo "algod localnet is up after ${i} attempt(s)."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::notice::algod localnet did not become healthy; continuing (no assertion depends on it)."
+
+      - name: Wait for Redis
+        run: |
+          for i in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/6379) 2>/dev/null; then
+              echo "redis is accepting connections after ${i} attempt(s)."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::redis never accepted a connection"
+          exit 1
+
+      # A real deployment must use a funded, USDC-opted-in address. CI has neither, so it falls
+      # back to a syntactically valid placeholder: the gateway can still issue and shape-check
+      # challenges, which is what the no-secret path asserts.
+      - name: Resolve the gateway payTo address
+        id: payto
+        run: |
+          if [ -n "${X402_PAY_TO_ADDRESS_SECRET}" ]; then
+            echo "address=${X402_PAY_TO_ADDRESS_SECRET}" >> "$GITHUB_OUTPUT"
+            echo "using the configured X402_PAY_TO_ADDRESS secret"
+          else
+            echo "address=MESHA65YISXOIW6STKMGJ5AFBZK2UJQNHR3LQZPG2LHIRB4YBPFJPT5WGU" >> "$GITHUB_OUTPUT"
+            echo "::notice::no X402_PAY_TO_ADDRESS secret; using the documented placeholder address"
+          fi
+
+      - name: Boot the gateway
+        env:
+          PORT: "8402"
+          HOST: 127.0.0.1
+          MESH_NETWORK: testnet
+          REDIS_URL: redis://127.0.0.1:6379
+          X402_PAY_TO_ADDRESS: ${{ steps.payto.outputs.address }}
+          MESH_PUBLIC_BASE_URL: http://127.0.0.1:8402
+          MESH_INBOUND_PRICE_USDC: "0.0020"
+          MESH_MARGIN_BPS: "1500"
+          # The mock node's operator address is generated per run and has never touched a
+          # chain, so it cannot be opted in to USDC. Enforcing the opt-in here would make every
+          # node unroutable and there would be nothing to assert.
+          MESH_REQUIRE_USDC_OPT_IN: "false"
+          LOG_LEVEL: info
+        run: |
+          npm run start --workspace @x402-mesh/gateway > gateway.log 2>&1 &
+          echo $! > gateway.pid
+          for i in $(seq 1 60); do
+            if curl -fsS --max-time 2 http://127.0.0.1:8402/healthz >/dev/null 2>&1; then
+              echo "gateway healthy after ${i} attempt(s)."
+              exit 0
+            fi
+            if ! kill -0 "$(cat gateway.pid)" 2>/dev/null; then
+              echo "::error::the gateway process exited during startup"
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "::error::the gateway never answered /healthz"
+          exit 1
+
+      - name: Inspect the discovery manifest
+        run: |
+          curl -fsS http://127.0.0.1:8402/.well-known/x402 | tee manifest.json
+          node -e '
+            const m = require("./manifest.json");
+            const tags = m.items?.[0]?.tags ?? [];
+            if (!tags.includes("x402-global-challenge")) {
+              console.error("::error::the served manifest is missing the x402-global-challenge tag");
+              process.exit(1);
+            }
+            console.log("served manifest carries the challenge tag");
+          '
+
+      # One step, two behaviours. The harness starts a mock inference node, registers it with
+      # the gateway, and asserts the 402 challenge. If AVM_PRIVATE_KEY is present it then pays
+      # through the real facilitator and asserts the routed completion, the SSE stream and the
+      # settlement split; if it is absent it reports the paid legs as skipped and still exits 0.
+      - name: 402 -> pay -> route -> stream -> split (live gateway)
+        env:
+          MESH_E2E_BASE_URL: http://127.0.0.1:8402
+          MESH_E2E_MODEL: llama3.1:8b
+          MESH_NETWORK: testnet
+        run: npx tsx scripts/e2e-simulate.ts
+
+      - name: Assert the settlement ledger
+        if: ${{ env.AVM_PRIVATE_KEY != '' }}
+        run: |
+          curl -fsS "http://127.0.0.1:8402/v1/settlements?limit=20" | tee settlements.json
+          node -e '
+            const { settlements = [] } = require("./settlements.json");
+            if (settlements.length === 0) {
+              console.error("::error::a paid run wrote no settlement records");
+              process.exit(1);
+            }
+            let bad = 0;
+            for (const s of settlements) {
+              const inbound = BigInt(s.inboundAtomic);
+              const payout = BigInt(s.payoutAtomic);
+              const margin = BigInt(s.marginAtomic);
+              if (inbound - payout !== margin || payout < 0n || margin < 0n) {
+                console.error(`::error::invariant violated on ${s.requestId}: ${s.inboundAtomic} - ${s.payoutAtomic} != ${s.marginAtomic}`);
+                bad += 1;
+              }
+              if (inbound !== 2000n || payout !== 1700n || margin !== 300n) {
+                console.error(`::error::unexpected split on ${s.requestId}: ${s.inboundAtomic}/${s.payoutAtomic}/${s.marginAtomic}`);
+                bad += 1;
+              }
+            }
+            if (bad > 0) process.exit(1);
+            console.log(`${settlements.length} settlement(s): inbound - payout == margin, 2000 = 1700 + 300 atomic USDC`);
+          '
+
+      - name: Gateway log
+        if: always()
+        run: |
+          echo "::group::gateway.log"
+          tail -n 400 gateway.log || true
+          echo "::endgroup::"
+
+      - name: Stop the gateway
+        if: always()
+        run: |
+          if [ -f gateway.pid ]; then kill "$(cat gateway.pid)" 2>/dev/null || true; fi
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-gateway-log
+          path: |
+            gateway.log
+            manifest.json
+            settlements.json
+          retention-days: 7
+          if-no-files-found: ignore

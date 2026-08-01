@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/shared" },
+    { "path": "./packages/registry" },
+    { "path": "./packages/gateway" },
+    { "path": "./packages/node-daemon" }
+  ]
+}

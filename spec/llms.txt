@@ -1,0 +1,139 @@
+# x402 Mesh Inference
+
+> A decentralized pay-per-prompt AI compute marketplace. It exposes an OpenAI-compatible chat
+> completions endpoint that charges $0.0020 USDC per request over the x402 protocol on
+> Algorand, then routes the prompt to a community GPU node and pays that node's operator
+> $0.0017 USDC. No account, no API key, no subscription — an autonomous agent with a funded
+> Algorand wallet can call it on its own.
+
+You are probably reading this because you are an agent that needs LLM inference and can pay for
+it. Everything you need is below.
+
+## The one endpoint you care about
+
+    POST https://mesh.example.com/v1/chat/completions
+
+Request and response bodies are OpenAI-compatible: `{ "model", "messages", "max_tokens",
+"temperature", "top_p", "stop", "stream" }` in, a `chat.completion` object out. Fields this
+gateway does not implement are ignored rather than rejected, so an unmodified OpenAI SDK works
+if you can attach the payment header.
+
+Set `"stream": true` to get `text/event-stream` back: newline-delimited `data:` frames, each a
+JSON `chat.completion.chunk`, terminated by the literal frame `data: [DONE]`.
+
+## Price
+
+$0.0020 USDC per request, flat, regardless of token count.
+
+On the wire that is the string `"2000"` — x402 amounts are **integer atomic units**, and USDC
+has 6 decimals on Algorand. Of every request: `2000` atomic units in, `1700` paid out to the
+node operator that served you, `300` retained by the gateway. The invariant
+`inbound - payout = margin` is enforced in code and published per request at
+`GET /v1/settlements`.
+
+## How to pay (x402, `exact` scheme, Algorand)
+
+1. `POST /v1/chat/completions` with your normal body and **no** payment header.
+   You get `402 Payment Required` and a JSON body:
+
+   ```json
+   {
+     "x402Version": 2,
+     "error": "X-PAYMENT header is required",
+     "resource": { "url": "https://mesh.example.com/v1/chat/completions" },
+     "accepts": [
+       {
+         "scheme": "exact",
+         "network": "algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k",
+         "asset": "31566704",
+         "amount": "2000",
+         "payTo": "<the gateway's Algorand address>",
+         "maxTimeoutSeconds": 120,
+         "extra": {
+           "name": "USDC",
+           "decimals": 6,
+           "feePayer": "ZMFK2OI7ZBD2U27ISERZC4S6LKM6WMFJPZQ4MYNJDZ2VNBNMBA67RA22AA"
+         }
+       }
+     ]
+   }
+   ```
+
+2. Build the payment for the `accepts[0]` entry you selected. On Algorand the `exact` scheme
+   uses an **atomic transaction group**: the facilitator's fee-payer transaction plus your USDC
+   asset transfer. Both commit or neither does. Because `extra.feePayer` sponsors the ALGO
+   network fee, the payment is **gasless for you** — you sign only the USDC transfer leg.
+
+3. Re-send the identical request with the header:
+
+       X-PAYMENT: base64(JSON PaymentPayload)
+
+   where `PaymentPayload` is `{ "x402Version": 2, "accepted": <the accepts[] entry you chose>,
+   "payload": { "paymentGroup": ["<base64 msgpack txn>", ...], "paymentIndex": 0 } }`.
+
+4. You get `200` with the completion, plus a `PAYMENT-RESPONSE` response header containing
+   base64 JSON with the confirmed Algorand transaction id.
+
+The easiest way to do all of this is the reference client:
+
+    npm install @x402/core @x402/avm
+    import { x402Client } from "@x402/core/client";
+    import { ExactAvmScheme } from "@x402/avm/exact/client";
+
+## Prerequisites you will hit if you skip them
+
+Algorand is opt-in. **Your wallet must opt in to the USDC ASA before you can hold or send it**
+(asset id `31566704` on MainNet, `10458941` on TestNet). An opt-in is a zero-amount asset
+transfer to yourself. You also need a minimum balance in ALGO: 0.1 ALGO for the account plus
+0.1 ALGO per opted-in asset. Without the opt-in your payment will fail, not silently succeed.
+
+## Models
+
+Whatever the currently registered nodes advertise. Query it, do not guess:
+
+    GET /v1/nodes?healthy=true
+
+Each node lists `capabilities[]` with `model`, `contextWindow`, an optional `quantization`, and
+the operator's quoted `pricePer1kTokensUsdc`. Typical entries are open-weight chat models served
+by Ollama or vLLM, for example `llama3.1:8b`, `qwen2.5:14b`, `mistral-nemo:12b`. Passing a model
+no healthy node advertises returns `503` with code `no_capacity` — and you are not charged,
+because the challenge is issued before routing.
+
+## Other endpoints
+
+- `GET /v1/nodes` — registered compute nodes, their health, and their advertised models. Free.
+- `GET /v1/settlements` — the two-legged USDC settlement audit trail. Free.
+- `GET /healthz` — liveness. Free.
+- `GET /readyz` — readiness, per-dependency. Free.
+- `GET /.well-known/x402` — this service's machine-readable discovery manifest. Free.
+- `POST /v1/nodes/register`, `POST /v1/nodes/{nodeId}/heartbeat` — for GPU operators joining the
+  mesh, not for inference clients. Ed25519-signed by the operator key.
+
+## Discovery
+
+- Discovery manifest: https://mesh.example.com/.well-known/x402
+- This file: https://mesh.example.com/llms.txt
+- OpenAPI 3.1 description: https://mesh.example.com/openapi.yaml
+- Discovery tags: `x402-global-challenge`, `ai`, `inference`, `llm`, `algorand`
+- Also listed in the x402 Bazaar via the `bazaar` discovery extension, so
+  `client.extensions.bazaar.search({ query: "llm inference" })` will find it.
+
+## Networks
+
+Canonical CAIP-2 identifiers (the 32-character truncated genesis hash form):
+
+- MainNet `algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73k`, USDC asset id `31566704`
+- TestNet `algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe`, USDC asset id `10458941`
+
+The facilitator advertises the same two chains using the full padded genesis hash
+(`algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8=`). Both encodings name the same chain;
+this service accepts either on input and always emits the canonical form.
+
+Facilitator: https://facilitator.goplausible.xyz
+
+## Errors
+
+Every error is `{ "error": { "code", "message", "details"? } }`. Codes you may see:
+`validation_error` (400), `auth_error` (401), `payment_error` (402), `rate_limited` (429),
+`internal_error` (500), `upstream_error` / `settlement_error` (502), `no_capacity` (503).
+Retrying a `no_capacity` after a few seconds is reasonable; retrying a `validation_error` is not.

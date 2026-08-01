@@ -1,0 +1,167 @@
+# x402 Mesh Inference — one-command local demo.
+#
+#   cp .env.example .env          # then edit at minimum X402_PAY_TO_ADDRESS and AVM_PRIVATE_KEY
+#   docker compose -f docker/docker-compose.yml up --build
+#
+# Brings up the whole loop on one host:
+#
+#   redis  <-- gateway <-- node-daemon --> ollama
+#                 ^
+#                 |  402 challenge / X-PAYMENT / SSE
+#              your agent
+#
+# Everything binds to loopback by default so an unfinished local deployment is not exposed to
+# the network. The gateway is reachable at http://127.0.0.1:8402.
+#
+# Verify the deployment before pointing an agent at it:
+#   npm run preflight
+#   MESH_E2E_BASE_URL=http://127.0.0.1:8402 npx tsx scripts/e2e-simulate.ts
+
+name: x402-mesh
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Append-only persistence: the node registry and the settlement ledger are an audit trail,
+    # and an audit trail that disappears on restart is not one.
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    # Uncomment on a machine with an NVIDIA GPU and the container toolkit installed. Without
+    # it Ollama runs on CPU, which is slow but perfectly adequate for the demo.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # Pulls the demo model once, then exits. The node daemon waits for it, so the mesh never
+  # advertises a model that is not actually loaded.
+  model-init:
+    image: ollama/ollama:latest
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      MESH_DEMO_MODEL: ${MESH_DEMO_MODEL:-llama3.2:1b}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "pulling ${MESH_DEMO_MODEL:-llama3.2:1b} (first run downloads it; later runs are instant)"
+        ollama pull "${MESH_DEMO_MODEL:-llama3.2:1b}"
+        echo "model ready"
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gateway
+    image: x402-mesh-gateway:local
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    # Values come from .env at the repository root; the defaults below are what a local demo
+    # needs. Secrets are never baked into the image.
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8402"
+      MESH_NETWORK: ${MESH_NETWORK:-testnet}
+      REDIS_URL: redis://redis:6379
+      X402_FACILITATOR_URL: ${X402_FACILITATOR_URL:-https://facilitator.goplausible.xyz}
+      X402_PAY_TO_ADDRESS: ${X402_PAY_TO_ADDRESS:?set X402_PAY_TO_ADDRESS in .env - run `npm run keygen` to generate one}
+      MESH_INBOUND_PRICE_USDC: ${MESH_INBOUND_PRICE_USDC:-0.0020}
+      MESH_MARGIN_BPS: ${MESH_MARGIN_BPS:-1500}
+      MESH_PUBLIC_BASE_URL: ${MESH_PUBLIC_BASE_URL:-http://127.0.0.1:8402}
+      # The local demo node's operator address will not be opted in to USDC on a fresh wallet,
+      # which would make it unroutable. Turn this back on before taking real payments.
+      MESH_REQUIRE_USDC_OPT_IN: ${MESH_REQUIRE_USDC_OPT_IN:-false}
+      # The demo node is reachable only at http://node-daemon:8500, a private compose
+      # address, so the SSRF guard has to be relaxed here. This is safe because the compose
+      # network is not publicly reachable — never set it on a deployed gateway.
+      MESH_ALLOW_PRIVATE_NODE_ENDPOINTS: ${MESH_ALLOW_PRIVATE_NODE_ENDPOINTS:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "127.0.0.1:8402:8402"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8402/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+
+  node-daemon:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.node-daemon
+    image: x402-mesh-node:local
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+      model-init:
+        condition: service_completed_successfully
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      MESH_GATEWAY_URL: http://gateway:8402
+      MESH_NODE_ID: ${MESH_NODE_ID:-gpu-local-01}
+      # How the gateway reaches this container, on the compose network.
+      MESH_NODE_ENDPOINT: http://node-daemon:8500
+      MESH_PROVIDER: ollama
+      MESH_PROVIDER_BASE_URL: http://ollama:11434
+      MESH_MODELS: ${MESH_DEMO_MODEL:-llama3.2:1b}
+      MESH_NETWORK: ${MESH_NETWORK:-testnet}
+      MESH_HEARTBEAT_INTERVAL_MS: ${MESH_HEARTBEAT_INTERVAL_MS:-15000}
+      MESH_MAX_CONCURRENCY: ${MESH_MAX_CONCURRENCY:-4}
+      # The operator's Algorand secret key. Keep it in .env (which is gitignored), or replace
+      # this with a compose `secrets:` mount backed by your secret store. It must never be
+      # committed, logged, or passed on a `docker run` command line.
+      AVM_PRIVATE_KEY: ${AVM_PRIVATE_KEY:?set AVM_PRIVATE_KEY in .env - run `npm run keygen` to generate one}
+    expose:
+      - "8500"
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  redis-data:
+  ollama-models:
