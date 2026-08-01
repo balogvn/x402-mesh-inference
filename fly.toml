@@ -1,0 +1,78 @@
+# Fly.io deployment for the x402 Mesh gateway.
+#
+# Create the app once, then deploy:
+#
+#   fly apps create x402-mesh-gateway
+#   fly secrets set X402_PAY_TO_ADDRESS=... AVM_PRIVATE_KEY=...
+#   fly deploy
+#
+# See docs/deploy-fly.md for the full runbook, including why the payout key is a
+# secret rather than an env entry and how to flip this to MainNet.
+
+app = "x402-mesh-gateway"
+primary_region = "iad"
+
+[build]
+  dockerfile = "docker/Dockerfile.gateway"
+
+# Non-secret configuration only. Anything here is readable by anyone who can read the
+# repository, so the payout address is the ONLY account value that belongs in this file —
+# and even that is set as a secret below so a fork cannot silently inherit it.
+[env]
+  PORT = "8402"
+  HOST = "0.0.0.0"
+  NODE_ENV = "production"
+  LOG_LEVEL = "info"
+
+  # TestNet first, deliberately. Prove the whole loop with free faucet USDC, then flip this
+  # to "mainnet" (and re-fund + re-opt-in the payout account) for the leaderboard payment.
+  MESH_NETWORK = "testnet"
+
+  # Must be the URL clients actually reach: it is baked into every 402 challenge and into
+  # the discovery manifest, so a wrong value produces challenges nobody can pay against.
+  # Update this if you rename the app or attach a custom domain.
+  MESH_PUBLIC_BASE_URL = "https://x402-mesh-gateway.fly.dev"
+
+  # A publicly reachable gateway must not accept node endpoints on private address space —
+  # that is the SSRF guard. Leave this false here; it is only relaxed for local development.
+  MESH_ALLOW_PRIVATE_NODE_ENDPOINTS = "false"
+
+  # Fly terminates TLS and forwards over its private network, adding exactly one hop. This
+  # is what lets the rate limiter see the real client IP instead of the proxy's. Do not
+  # raise it: over-counting lets a client spoof X-Forwarded-For and mint its own bucket.
+  MESH_TRUST_PROXY_HOPS = "1"
+
+[http_service]
+  internal_port = 8402
+  force_https = true
+
+  # Keep one machine warm. Fly's cold start is quick, but a judge or an autonomous agent
+  # hitting a stopped machine sees a delay on the very first request, which is exactly the
+  # request that matters most here. Drop to auto_stop_machines = true if cost matters more.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+# Liveness only — deliberately NOT /readyz.
+#
+# /readyz answers "can I take a paid request right now", which includes the payout wallet
+# being funded and opted in to USDC. Wiring that to Fly's health check would make an
+# unfunded wallet fail the deployment and roll it back, so a fresh deploy could never come
+# up long enough to be funded. /healthz proves the process is alive and serving; check
+# /readyz yourself after funding (`curl https://<app>.fly.dev/readyz`).
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "20s"
+  method = "GET"
+  path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

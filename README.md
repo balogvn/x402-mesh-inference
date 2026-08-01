@@ -44,7 +44,7 @@ flowchart LR
 
     subgraph GW["x402 Mesh Gateway"]
         direction TB
-        RL["rate limit<br/>keyed by payer address"]
+        RL["rate limit<br/>keyed by client IP"]
         PW["x402 paymentMiddleware<br/>@x402/express"]
         SEL["node selector<br/>latency .4 / price .3 / quality .3"]
         SET["double settlement<br/>bigint atomic units"]
@@ -129,6 +129,10 @@ Two properties are worth calling out because they are easy to get wrong:
 - An Algorand account with a little ALGO, **opted in to USDC** — see
   [Node operator guide](#node-operator-guide). For a local demo the opt-in requirement is
   switched off, so you can start without one.
+
+> **Deploying it for real?** See [docs/deploy-fly.md](docs/deploy-fly.md) for the Fly.io
+> runbook — public HTTPS, secrets handling, funding and opt-in, and the TestNet → MainNet
+> switch in the order that costs nothing to get wrong.
 
 ### Option A — the whole loop in one command
 
@@ -800,14 +804,27 @@ is bounded by `MESH_NODE_REQUEST_TIMEOUT_MS` and an `AbortSignal` that also fire
 disconnect.
 
 **Rate limiting.** A token bucket on the paid route only — 60 burst, 2/s sustained by default —
-keyed by **payer Algorand address first**, client IP second. The payer address is the
-economically meaningful identity: it survives NAT and proxies, and forging one is not free
-because producing a payment header for an address you do not control requires that address's
-signature. The address is decoded from the payment header _before_ verification, so it is treated
-as unauthenticated and used for bucketing only, never for authorization. Express is configured
-with `trust proxy: 1` rather than `true`, so a client cannot spoof `req.ip` and choose its own
-bucket. Rejections carry `Retry-After`. Note this is an in-process limiter: multi-replica
-deployments get per-replica limits.
+keyed by the **socket peer**.
+
+An earlier version keyed on the payer's Algorand address, decoded from the payment header, on
+the theory that forging one was not free. That was wrong, and an audit demonstrated it: the
+header is read _before_ the facilitator verifies anything, and the sender of an **unsigned**
+transaction decodes perfectly well, so forging cost nothing. It gave an attacker two options —
+name a paying customer's address to drain their bucket and 429 them indefinitely, or rotate a
+fresh random sender per request for unlimited full-capacity buckets and no effective limit at
+all. The lesson generalises: bucketing _is_ a security decision, so "unauthenticated but only
+used for bucketing" is not a safe category.
+
+Keying on the peer removes both attacks, at the cost of payers behind one NAT sharing a bucket
+— the right trade against an unbounded bypass. `MESH_TRUST_PROXY_HOPS` controls how many proxy
+hops may set the apparent client address and **defaults to 0**, meaning `X-Forwarded-For` is
+ignored entirely. It was previously hardcoded to `1`, which on a directly exposed gateway let a
+client mint a fresh bucket per request: measured, a rotating `X-Forwarded-For` yielded
+`[200, 200, 200, 200]` at `1` versus `[200, 200, 429, 429]` at `0`. Set it to exactly the number
+of proxies in front of the gateway — Fly is `1`, which [fly.toml](fly.toml) configures.
+
+Rejections carry `Retry-After`. Note this is an in-process limiter: multi-replica deployments
+get per-replica limits.
 
 **No secrets in logs.** The logging interface takes a structured object first and a message
 second, so nothing can be string-interpolated into a message. pino redacts `privateKey`,

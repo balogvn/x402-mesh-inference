@@ -160,6 +160,7 @@ jobs:
       DEPLOY_WEBHOOK_URL: ${{ secrets.DEPLOY_WEBHOOK_URL }}
       DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
       MESH_PUBLIC_BASE_URL: ${{ secrets.MESH_PUBLIC_BASE_URL }}
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
     steps:
       - name: Report what will be deployed
@@ -169,10 +170,48 @@ jobs:
           echo "environment   : ${{ github.event.inputs.environment || 'staging' }}"
 
       - name: Deployment is not configured
-        if: ${{ env.DEPLOY_WEBHOOK_URL == '' }}
+        if: ${{ env.DEPLOY_WEBHOOK_URL == '' && env.FLY_API_TOKEN == '' }}
         run: |
-          echo "::notice::DEPLOY_WEBHOOK_URL is not set, so nothing was rolled out. The images"
-          echo "::notice::above were built and pushed to GHCR and can be deployed by hand."
+          echo "::notice::Neither FLY_API_TOKEN nor DEPLOY_WEBHOOK_URL is set, so nothing was"
+          echo "::notice::rolled out. The images above were built and pushed to GHCR and can"
+          echo "::notice::be deployed by hand. See docs/deploy-fly.md."
+
+      # ---- Fly.io rollout -------------------------------------------------------------
+      # Gated on the token so forks and not-yet-configured repositories skip cleanly rather
+      # than failing red. flyctl reads FLY_API_TOKEN from the environment; it is never passed
+      # on the command line, where it would appear in the process list and the run log.
+      - name: Set up flyctl
+        if: ${{ env.FLY_API_TOKEN != '' }}
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy to Fly.io
+        if: ${{ env.FLY_API_TOKEN != '' }}
+        run: |
+          flyctl deploy --remote-only --wait-timeout 300 \
+            --image "${GATEWAY_IMAGE}" \
+            --config fly.toml
+        env:
+          GATEWAY_IMAGE: ${{ needs.build-and-push.outputs.gateway_image }}:${{ needs.build-and-push.outputs.sha }}
+
+      # Deploying the image is not the same as the service being usable. /healthz proves the
+      # process is up; /readyz is reported for visibility but not enforced, because it also
+      # covers payout-wallet funding, which is an operator task rather than a deploy failure.
+      - name: Verify the Fly deployment answers
+        if: ${{ env.FLY_API_TOKEN != '' }}
+        run: |
+          base="$(flyctl status --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const a=JSON.parse(d);process.stdout.write("https://"+(a.Hostname||a.hostname||""))})')"
+          echo "gateway: ${base}"
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 5 "${base}/healthz" > healthz.json 2>/dev/null; then
+              echo "healthy after ${i} attempt(s):"; cat healthz.json; echo
+              echo "readiness (informational — an unfunded payout wallet is expected here):"
+              curl -sS --max-time 5 "${base}/readyz" || true
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::the deployed gateway never answered /healthz"
+          exit 1
 
       # The rollout itself is a single authenticated HTTPS call to whatever runs the target
       # (a PaaS deploy hook, a webhook on the host, an internal control plane). The token is
