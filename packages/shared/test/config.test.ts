@@ -232,3 +232,42 @@ describe("loadDaemonConfig", () => {
     );
   });
 });
+
+/**
+ * Regression: the daemon's listen port must be overridable independently of its public URL.
+ *
+ * The port used to be derived solely from `MESH_NODE_ENDPOINT`, so an `https://…` endpoint
+ * implied 443. Behind a TLS terminator — Fly, Render, Railway, anything fronted by nginx —
+ * the public URL is :443 while the container must bind an unprivileged port, and a non-root
+ * container died on boot with `EACCES: permission denied 0.0.0.0:443`. Only a real deploy
+ * caught it.
+ */
+describe("loadDaemonConfig listen port", () => {
+  const base = {
+    MESH_GATEWAY_URL: "https://gateway.test",
+    MESH_NODE_ID: "node-1",
+    MESH_NODE_ENDPOINT: "https://node.test",
+    MESH_PROVIDER: "openai",
+    MESH_PROVIDER_BASE_URL: "https://api.groq.com/openai",
+    MESH_MODELS: "llama-3.3-70b-versatile",
+    MESH_NETWORK: "testnet",
+    AVM_PRIVATE_KEY: Buffer.alloc(64, 7).toString("base64"),
+  } as NodeJS.ProcessEnv;
+
+  it("is undefined by default, leaving the endpoint to imply it", () => {
+    expect(loadDaemonConfig(base).listenPort).toBeUndefined();
+  });
+
+  it("honours MESH_NODE_PORT when the public URL's port is unbindable", () => {
+    expect(loadDaemonConfig({ ...base, MESH_NODE_PORT: "8500" }).listenPort).toBe(8500);
+  });
+
+  it("rejects a port outside the valid TCP range", () => {
+    expect(() => loadDaemonConfig({ ...base, MESH_NODE_PORT: "0" })).toThrow();
+    expect(() => loadDaemonConfig({ ...base, MESH_NODE_PORT: "70000" })).toThrow();
+  });
+
+  it("rejects a non-numeric port rather than silently binding a default", () => {
+    expect(() => loadDaemonConfig({ ...base, MESH_NODE_PORT: "http" })).toThrow();
+  });
+});

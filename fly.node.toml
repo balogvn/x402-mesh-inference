@@ -29,6 +29,12 @@ primary_region = "iad"
   # external hostname, not 127.0.0.1. It also fixes the port the daemon listens on.
   MESH_NODE_ENDPOINT = "https://x402-mesh-node.fly.dev"
 
+  # The port to actually bind, which is NOT the port in the endpoint above. Fly terminates
+  # TLS and forwards to internal_port, so the public URL is :443 while the container listens
+  # here. Without this the daemon derives 443 from the https endpoint and a non-root
+  # container dies with `EACCES: permission denied 0.0.0.0:443`.
+  MESH_NODE_PORT = "8500"
+
   MESH_NODE_ID = "demo-node-01"
 
   # Any OpenAI-compatible backend. `openai` speaks the same wire protocol as vLLM, so this

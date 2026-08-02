@@ -278,6 +278,16 @@ export interface DaemonConfig {
   nodeId: string;
   /** Absolute URL the gateway will forward inference requests to. */
   endpoint: string;
+  /**
+   * Local TCP port to bind. Defaults to the port implied by {@link DaemonConfig.endpoint}.
+   *
+   * Override it whenever the public URL's port is not a port the process can actually bind —
+   * which is the norm behind a TLS terminator. On Fly, Render or Railway the endpoint is
+   * `https://…` (port 443) while the container must listen on an unprivileged port, and a
+   * non-root container that tries to bind 443 dies with
+   * `EACCES: permission denied 0.0.0.0:443`.
+   */
+  listenPort?: number;
   provider: DaemonProvider;
   providerBaseUrl: string;
   /** Models this node advertises. */
@@ -300,6 +310,10 @@ const DaemonEnvSchema = z.object({
       .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, "nodeId contains illegal characters"),
   ),
   MESH_NODE_ENDPOINT: requiredUrlField(),
+  MESH_NODE_PORT: z.preprocess(
+    (v) => (envValue(v) === undefined ? undefined : Number(envValue(v))),
+    z.number().int().min(1).max(65_535).optional(),
+  ),
   MESH_PROVIDER: enumField(PROVIDER_VALUES, "ollama"),
   MESH_PROVIDER_BASE_URL: optionalUrlField(),
   MESH_MODELS: z.preprocess(
@@ -347,6 +361,7 @@ export function loadDaemonConfig(env: NodeJS.ProcessEnv = process.env): DaemonCo
     gatewayUrl: stripTrailingSlash(parsed.MESH_GATEWAY_URL),
     nodeId: parsed.MESH_NODE_ID,
     endpoint: stripTrailingSlash(parsed.MESH_NODE_ENDPOINT),
+    ...(parsed.MESH_NODE_PORT === undefined ? {} : { listenPort: parsed.MESH_NODE_PORT }),
     provider,
     providerBaseUrl: stripTrailingSlash(
       parsed.MESH_PROVIDER_BASE_URL ?? PROVIDER_DEFAULT_BASE_URL[provider],

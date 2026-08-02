@@ -79,7 +79,7 @@ export async function startCommand(options: StartCommandOptions = {}): Promise<R
     maxConcurrency: config.maxConcurrency,
     nodeId: config.nodeId,
     models: config.models,
-    port: options.port ?? portFromEndpoint(config.endpoint),
+    port: options.port ?? config.listenPort ?? portFromEndpoint(config.endpoint),
     host: options.host ?? "0.0.0.0",
     log: (event) => log.info(event),
   };
