@@ -164,10 +164,20 @@ export class NodeServer {
         return;
       }
 
-      if (path === "/infer") {
+      // `/v1/chat/completions` is the path the GATEWAY calls (see NODE_CHAT_PATH in
+      // packages/gateway/src/services/router.ts) and the one an OpenAI-compatible client
+      // expects. It has to be served here or no paid request can ever reach this node.
+      //
+      // The daemon originally served only `/infer`, so the gateway's routed request got a
+      // 404 and every paid request died with `upstream_error: node returned HTTP 404`. No
+      // test caught it: the mock node in scripts/lib/mock-node.ts serves
+      // `/v1/chat/completions`, matching the gateway, so the suite exercised a contract the
+      // real daemon did not implement. `/infer` stays as an alias so anything already
+      // pointed at it keeps working.
+      if (path === "/v1/chat/completions" || path === "/infer") {
         if (req.method !== "POST") {
           sendJson(res, 405, {
-            error: { code: "method_not_allowed", message: "use POST /infer" },
+            error: { code: "method_not_allowed", message: `use POST ${path}` },
           });
           return;
         }

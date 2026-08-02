@@ -180,7 +180,11 @@ describe("routing", () => {
   it("answers 404 for an unknown path", async () => {
     const { provider } = stubProvider();
     await withServer({ provider, maxConcurrency: 1 }, async (base) => {
-      const res = await fetch(`${base}/v1/chat/completions`);
+      // NB: this used to probe `/v1/chat/completions` as its example of an unknown path,
+      // which quietly asserted the bug as correct — that is the exact path the gateway
+      // routes paid work to, and the daemon not serving it made every paid request fail
+      // with `node returned HTTP 404`. Use a path nothing claims.
+      const res = await fetch(`${base}/definitely-not-a-route`);
       expect(res.status).toBe(404);
       expect(await res.json()).toMatchObject({ error: { code: "not_found" } });
     });

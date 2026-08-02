@@ -390,6 +390,28 @@ function validateDockerEntrypoints(checklist: Checklist): void {
     checklist.pass("daemon healthcheck path", `${probed} is served`);
   }
 
+  // The gateway routes paid work to `${node.endpoint}${NODE_CHAT_PATH}`. If the daemon does
+  // not serve that exact path, every paid request dies with `node returned HTTP 404` — which
+  // is precisely what happened in production. No unit test caught it, because the mock node
+  // implements the gateway's contract while the real daemon implemented a different one.
+  try {
+    const routerSrc = readFileSync("packages/gateway/src/services/router.ts", "utf8");
+    const daemonSrc = readFileSync("packages/node-daemon/src/server.ts", "utf8");
+    const called = /NODE_CHAT_PATH\s*=\s*"([^"]+)"/.exec(routerSrc)?.[1];
+    if (called === undefined) {
+      checklist.fail("node inference path", "could not read NODE_CHAT_PATH from the router");
+    } else if (!daemonSrc.includes(`"${called}"`)) {
+      checklist.fail(
+        "node inference path",
+        `gateway calls ${called} but packages/node-daemon/src/server.ts does not serve it`,
+      );
+    } else {
+      checklist.pass("node inference path", `gateway and daemon agree on ${called}`);
+    }
+  } catch (e) {
+    checklist.fail("node inference path", errorMessage(e));
+  }
+
   const gatewayPath = "docker/Dockerfile.gateway";
   try {
     const gateway = readFileSync(gatewayPath, "utf8");
