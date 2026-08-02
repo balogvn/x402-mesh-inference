@@ -48,11 +48,28 @@ export interface RetryPolicy {
   jitterRatio: number;
 }
 
-/** Three attempts over roughly a second of backoff: enough for a transient algod blip. */
+/**
+ * Backoff sized against Algorand block time, not against an algod blip.
+ *
+ * The payout spends the USDC the inbound leg just delivered, and those funds are only
+ * spendable once the inbound transaction reaches finality — roughly one 2.8s block, sometimes
+ * more. This policy previously ran three attempts over ~0.75s total, which cannot outlast a
+ * single round, so on a gateway wallet with no float the very first payout of its life failed
+ * every time with:
+ *
+ *     TransactionPool.Remember: underflow on subtracting 1700 from sender amount 0
+ *
+ * Observed in production: all three attempts fired inside one second, the client was charged,
+ * and the operator was not paid. The second request then succeeded only because the first
+ * request's inbound had landed by then and left a balance behind.
+ *
+ * 4 attempts at 3s / 6s / 12s spans ~21s and comfortably crosses several rounds. This costs
+ * the client nothing: the payout runs after the response has already been delivered.
+ */
 export const DEFAULT_RETRY_POLICY: RetryPolicy = {
-  attempts: 3,
-  baseDelayMs: 250,
-  maxDelayMs: 4_000,
+  attempts: 4,
+  baseDelayMs: 3_000,
+  maxDelayMs: 15_000,
   jitterRatio: 0.25,
 };
 

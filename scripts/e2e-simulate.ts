@@ -475,9 +475,26 @@ async function assertSettlementSplit(
   baseUrl: string,
   expectedNodeId: string,
 ): Promise<void> {
-  let body: { settlements?: unknown[]; count?: number };
+  // The operator payout is deliberately asynchronous: it runs AFTER the client's response so
+  // a payout problem can never delay or fail the request that was paid for. It also retries
+  // across Algorand block finality, so it can take ~20s to reach a terminal state. Reading
+  // the ledger the instant the response lands therefore races the payout and reports
+  // spurious "payout leg settled 2/4" failures. Poll until every record for this node is
+  // terminal, or give up and let the assertions report what is actually there.
+  const settleDeadline = Date.now() + 45_000;
+  let body: { settlements?: unknown[]; count?: number } = {};
   try {
-    body = await httpJson<{ settlements?: unknown[]; count?: number }>(`${baseUrl}/v1/settlements`);
+    for (;;) {
+      body = await httpJson<{ settlements?: unknown[]; count?: number }>(
+        `${baseUrl}/v1/settlements`,
+      );
+      const rows = (body.settlements ?? []) as { nodeId?: string; status?: string }[];
+      const ours = rows.filter((r) => r.nodeId === expectedNodeId);
+      const pending = ours.filter((r) => r.status !== "settled" && r.status !== "failed");
+      if (ours.length > 0 && pending.length === 0) break;
+      if (Date.now() > settleDeadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
   } catch (e) {
     checklist.fail("settlement ledger", errorMessage(e));
     return;
@@ -498,11 +515,16 @@ async function assertSettlementSplit(
   }
   checklist.pass("settlement ledger", `${records.length} record(s)`);
 
+  // Attribution is not cosmetic: every economics assertion below iterates `mine`, so a
+  // filter that matches nothing turns the invariant and split checks into vacuous passes
+  // over an empty set. Against a deployed mesh the serving node is the registered one, not
+  // the mock this harness would otherwise have spawned — filtering on the mock's id reported
+  // "0 of 2" while the split checks silently verified nothing.
   const mine = records.filter((r) => r.nodeId === expectedNodeId);
   expect(
     checklist,
     mine.length > 0,
-    "settlement attributed to the mock node",
+    `settlement attributed to ${expectedNodeId}`,
     `${mine.length} of ${records.length}`,
   );
 
@@ -589,12 +611,14 @@ async function main(): Promise<number> {
       checklist.pass("mock node", `${node.url} serving ${model}`);
     }
 
+    let registeredNodeId: string | undefined;
     if (useRegistered) {
       const listed = await fetch(`${target.baseUrl}/v1/nodes`, {
         signal: AbortSignal.timeout(20_000),
       });
       const body = (await listed.json()) as { nodes?: { nodeId: string; routable?: boolean }[] };
       const routable = (body.nodes ?? []).filter((n) => n.routable !== false);
+      registeredNodeId = routable[0]?.nodeId;
       expect(
         checklist,
         routable.length > 0,
@@ -663,7 +687,7 @@ async function main(): Promise<number> {
         await assertPaidStream(checklist, target.baseUrl, model, streamChallenge, payer);
       }
 
-      await assertSettlementSplit(checklist, target.baseUrl, nodeId);
+      await assertSettlementSplit(checklist, target.baseUrl, registeredNodeId ?? nodeId);
 
       // Only assertable when the harness owns the node. Against a deployed mesh the node is
       // a separate process, so the proof it served the request is the completion itself

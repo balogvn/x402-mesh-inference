@@ -4,7 +4,7 @@ import type { x402ResourceServer } from "@x402/core/server";
 import { attachSettlementHook } from "../src/app.js";
 import { silentLogger } from "../src/logger.js";
 import type { Logger } from "../src/logger.js";
-import { DoubleSettlementService } from "../src/services/settlement.js";
+import { DEFAULT_RETRY_POLICY, DoubleSettlementService } from "../src/services/settlement.js";
 import { makeClock, makeConfig, makeNodeRecord, StubPayer, StubSettlement } from "./helpers.js";
 
 /**
@@ -161,7 +161,9 @@ describe("retry and failure", () => {
     service.settleInbound(inbound("req-dead"));
     await service.whenIdle();
 
-    expect(payer.payments).toHaveLength(3);
+    // Derived from the policy rather than hardcoded: this assertion pinned the old
+    // 3-attempt backoff and would silently fight the next tuning change.
+    expect(payer.payments).toHaveLength(DEFAULT_RETRY_POLICY.attempts);
     const record = service.getRecord("req-dead");
     expect(record?.status).toBe("failed");
     expect(record?.payoutTxId).toBeNull();
@@ -294,5 +296,38 @@ describe("attachSettlementHook", () => {
 
     expect(spy).toHaveBeenCalled();
     expect(settlement.inbound).toHaveLength(0);
+  });
+});
+
+/**
+ * Regression: the payout backoff must outlast Algorand block finality.
+ *
+ * The payout spends the USDC the inbound leg just delivered, and that money is not spendable
+ * until the inbound transaction is final — about one 2.8s block. The old policy ran three
+ * attempts over ~0.75s, so a gateway wallet holding no float failed its very first payout
+ * every time: "underflow on subtracting 1700 from sender amount 0". Observed in production —
+ * client charged, operator unpaid, all three attempts inside one second.
+ */
+describe("payout retry policy", () => {
+  /** One Algorand block, the floor any funds-related retry has to clear. */
+  const ALGORAND_BLOCK_MS = 2_800;
+
+  it("spans more than a single block before giving up", () => {
+    let total = 0;
+    let delay = DEFAULT_RETRY_POLICY.baseDelayMs;
+    for (let i = 1; i < DEFAULT_RETRY_POLICY.attempts; i++) {
+      total += Math.min(delay, DEFAULT_RETRY_POLICY.maxDelayMs);
+      delay *= 2;
+    }
+    expect(total).toBeGreaterThan(ALGORAND_BLOCK_MS * 2);
+  });
+
+  it("waits at least one block before the first retry", () => {
+    // A sub-block first retry is guaranteed to observe the same unfunded balance.
+    expect(DEFAULT_RETRY_POLICY.baseDelayMs).toBeGreaterThanOrEqual(ALGORAND_BLOCK_MS);
+  });
+
+  it("makes more than two attempts", () => {
+    expect(DEFAULT_RETRY_POLICY.attempts).toBeGreaterThanOrEqual(3);
   });
 });
