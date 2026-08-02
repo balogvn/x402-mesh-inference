@@ -175,11 +175,15 @@ interface Payer {
   /** Human label for the checklist. */
   kind: "stub" | "real";
   /**
-   * Builds the `X-PAYMENT` header value for a challenge.
+   * Builds the payment headers for a challenge.
    *
-   * @throws when the challenge cannot be paid, which the caller turns into a failed check.
+   * Returns the full header MAP rather than a value, because the header *name* is part of
+   * the protocol. x402 v2 carries the payload in `PAYMENT-SIGNATURE`; renaming it to
+   * `X-PAYMENT` makes `paymentMiddleware` ignore it and answer 402 again, which is exactly
+   * what this harness did — and stub mode never caught it, because the stub gateway accepts
+   * `X-PAYMENT`. Let the SDK name its own headers.
    */
-  buildHeader(challenge: PaymentRequired): Promise<string>;
+  buildHeader(challenge: PaymentRequired): Promise<Record<string, string>>;
 }
 
 /** A payer that produces the stub facilitator's transfer descriptor. */
@@ -189,14 +193,16 @@ function stubPayer(keypair: AlgorandKeypair): Payer {
     buildHeader: async (challenge) => {
       const requirements = challenge.accepts[0];
       if (requirements === undefined) throw new Error("challenge carried no accepts[] entry");
-      return encodeStubPayment({
-        network: requirements.network,
-        assetId: requirements.asset,
-        amountAtomic: requirements.amount,
-        payTo: requirements.payTo,
-        payer: keypair.address,
-        feePayer: String(requirements.extra?.["feePayer"] ?? keypair.address),
-      });
+      return {
+        "X-PAYMENT": encodeStubPayment({
+          network: requirements.network,
+          assetId: requirements.asset,
+          amountAtomic: requirements.amount,
+          payTo: requirements.payTo,
+          payer: keypair.address,
+          feePayer: String(requirements.extra?.["feePayer"] ?? keypair.address),
+        }),
+      };
     },
   };
 }
@@ -222,10 +228,10 @@ function realPayer(privateKeyB64: string, _network: Network): Payer {
     kind: "real",
     buildHeader: async (challenge) => {
       const payload = await http.createPaymentPayload(challenge);
+      // Verbatim: whatever the SDK names them is what the middleware reads.
       const headers = http.encodePaymentSignatureHeader(payload);
-      const value = headers["X-PAYMENT"] ?? Object.values(headers)[0];
-      if (value === undefined) throw new Error("client produced no X-PAYMENT header");
-      return value;
+      if (Object.keys(headers).length === 0) throw new Error("client produced no payment header");
+      return headers;
     },
   };
 }
@@ -337,18 +343,21 @@ async function assertPaidCompletion(
   challenge: PaymentRequired,
   payer: Payer,
 ): Promise<string | undefined> {
-  let header: string;
+  let header: Record<string, string>;
   try {
     header = await payer.buildHeader(challenge);
   } catch (e) {
-    checklist.fail("build X-PAYMENT", errorMessage(e));
+    checklist.fail("build payment header", errorMessage(e));
     return undefined;
   }
-  checklist.pass("build X-PAYMENT", `${payer.kind} payer, ${header.length} chars`);
+  checklist.pass(
+    "build payment header",
+    `${payer.kind} payer, sent as ${Object.keys(header).join(", ")}`,
+  );
 
   const response = await fetch(`${baseUrl}/v1/chat/completions`, {
     method: "POST",
-    headers: { "content-type": "application/json", "X-PAYMENT": header },
+    headers: { "content-type": "application/json", ...header },
     body: JSON.stringify({
       model,
       messages: [{ role: "user", content: "Explain the x402 protocol in one sentence." }],
@@ -404,17 +413,17 @@ async function assertPaidStream(
   challenge: PaymentRequired,
   payer: Payer,
 ): Promise<void> {
-  let header: string;
+  let header: Record<string, string>;
   try {
     header = await payer.buildHeader(challenge);
   } catch (e) {
-    checklist.fail("build X-PAYMENT (stream)", errorMessage(e));
+    checklist.fail("build payment header (stream)", errorMessage(e));
     return;
   }
 
   const response = await fetch(`${baseUrl}/v1/chat/completions`, {
     method: "POST",
-    headers: { "content-type": "application/json", "X-PAYMENT": header },
+    headers: { "content-type": "application/json", ...header },
     body: JSON.stringify({
       model,
       messages: [{ role: "user", content: "Stream me one sentence." }],
