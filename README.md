@@ -108,7 +108,9 @@ The gateway never performs floating-point arithmetic on an amount — all three 
 8. **Pay the operator.** `onAfterSettle` fires — only on _confirmed_ settlement, never on mere
    verification — and hands `x-request-id` + `x-mesh-node-id` to the settlement service. It
    recomputes the split, re-asserts `inbound − payout === margin`, and pays leg 2: `1700` atomic
-   USDC to the operator's address, with three attempts of jittered exponential backoff.
+   USDC to the operator's address, with four attempts of jittered exponential backoff spanning
+   ~21s — deliberately longer than Algorand block finality, because the payout spends the USDC
+   the inbound leg just delivered and that money is not spendable until the inbound is final.
 9. **Audit.** Every request lands in the ledger at `GET /v1/settlements`, with all three legs, the
    inbound and payout transaction ids, and a terminal `settled` / `failed` status.
 
@@ -898,10 +900,54 @@ network access at all**:
 npx tsx scripts/e2e-simulate.ts
 ```
 
-<!-- TODO: deployed gateway URL (MESH_PUBLIC_BASE_URL of the judged deployment) -->
-<!-- TODO: gateway payTo Algorand address used for the submission -->
+### Live deployment
+
+Both services run on Fly.io and are reachable now.
+
+|                     |                                                                                                     |
+| ------------------- | --------------------------------------------------------------------------------------------------- |
+| **Gateway**         | <https://x402-mesh-gateway.fly.dev>                                                                 |
+| **Chat client**     | <https://x402-mesh-gateway.fly.dev/chat>                                                            |
+| **Discovery**       | <https://x402-mesh-gateway.fly.dev/.well-known/x402> · <https://x402-mesh-gateway.fly.dev/llms.txt> |
+| **Node**            | <https://x402-mesh-node.fly.dev> — Groq `llama-3.3-70b-versatile` via the `openai` provider         |
+| **Network**         | Algorand TestNet, USDC ASA `10458941`                                                               |
+| **Gateway `payTo`** | `R5UN7S5G3AMKBDFEB42E7LSUT7JJGGZ6HL2S74ULBBZ36GWZVHEHJ53AOY`                                        |
+| **Node operator**   | `YXCMAGX5RIPBZKO25LAXJJKAM3L3UCTFE6AAZFJC3HULVGQWBAUDQKEJIQ`                                        |
+
+Open the gateway in a browser and press **Send an unpaid request**: it fires a genuine request
+at the paid route and renders the decoded `payment-required` challenge, so the whole x402
+handshake is visible **without a wallet**. A browser hitting the paid route directly gets the
+official `@x402/paywall` with Pera/Defly support.
+
+### Verified end to end on TestNet
+
+The full loop has been exercised against this deployment with real money — not a stub:
+
+```
+settlement ledger                      6 record(s)
+settlement attributed to demo-node-01  6 of 6
+invariant inbound - payout == margin   6 record(s) checked
+split matches published economics      2000 = 1700 + 300 atomic USDC
+operator payout leg settled            6/6
+e2e-simulate --use-registered-node     35 passed, 0 failed
+```
+
+On-chain USDC movement for one request: client **−2000**, gateway **+300** retained, node
+operator **+1700**. Example transaction pair from a settled request:
+
+```
+inbound  L4U7J36T5XCK6TWEPWNZIXQFFW3RL3GXUE44NW3KRVULI7M2CWMA
+payout   Y7EWAKJQOECD64KUMAITJCV2YRROST6G66OE3ZARTXIUIPIQVCJA
+```
+
+Reproduce it against the live gateway with a funded, USDC-opted-in TestNet account:
+
+```bash
+MESH_E2E_BASE_URL=https://x402-mesh-gateway.fly.dev AVM_PRIVATE_KEY=<your key> npx tsx scripts/e2e-simulate.ts --use-registered-node
+```
+
 <!-- TODO: demo video link -->
-<!-- TODO: MainNet transaction ids for one settled request (inbound + payout legs) -->
+<!-- TODO: MainNet transaction ids, once the leaderboard payment is made (inbound + payout legs) -->
 
 ---
 

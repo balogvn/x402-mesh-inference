@@ -204,6 +204,40 @@ indexed on the x402 leaderboard.
 
 ---
 
+## Things that actually went wrong
+
+Every item here cost real time during the first deployment. None of them are hypothetical.
+
+**Fly's trial plan hard-stops machines after 5 minutes.** `auto_stop_machines = false` and
+`min_machines_running = 1` are applied correctly and ignored — the log line is
+`Trial machine stopping. To run for longer than 5m0s, add a credit card`. The node registers,
+heartbeats, dies ~5 minutes later, and the gateway then has no routable node. Add a card
+before trying to demo anything; the free allowance still covers this workload.
+
+**The daemon's listen port is not the port in its URL.** `MESH_NODE_ENDPOINT` is the _public_
+URL, which on Fly is `https://…` (port 443). A non-root container cannot bind 443 and dies
+with `EACCES: permission denied 0.0.0.0:443`. Set `MESH_NODE_PORT` to the container's
+`internal_port`. This applies to every TLS-terminating platform, not just Fly.
+
+**A gateway with no float fails its first payout.** The payout spends the USDC the inbound leg
+just delivered, and that is not spendable until the inbound transaction is final (~one 2.8s
+block). If the retry backoff is shorter than a block, the first payout of a wallet's life
+fails with `underflow on subtracting 1700 from sender amount 0`, the client is charged and the
+operator is not paid. The default policy now spans ~21s. The bug is invisible once the wallet
+has a balance, so only a fresh deployment ever hits it — check `GET /v1/settlements` after the
+first real request.
+
+**The in-memory registry does not survive a restart.** After any gateway restart the node must
+re-register. The gateway answers an unknown node's heartbeat with 404 and the daemon
+re-registers on 404/410, so this self-heals within one heartbeat interval — but only because
+the status code is 404. If you see nodes silently vanish, check that first. Set `REDIS_URL`
+for a registry that survives restarts.
+
+**Fly's CLI can time out while the deploy succeeds.** `failed to get VM … request canceled` is
+a client-side API timeout, not a failed rollout. Check `flyctl status` before redeploying.
+
+---
+
 ## Troubleshooting
 
 | Symptom                                        | Cause                                                                                                                                                                                             |
