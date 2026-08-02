@@ -142,3 +142,37 @@ describe("heartbeat authentication", () => {
     }
   });
 });
+
+/**
+ * Regression: an unknown node must get 404, not 400.
+ *
+ * The daemon re-registers on 404/410 and treats 400 as "my request is malformed, retrying
+ * will not help". The gateway returned 400 when it had forgotten a node — which happens on
+ * every restart, since the default registry is in-memory. The result, observed in production:
+ * a healthy node heartbeated into a void indefinitely, the gateway served `503 no_capacity`,
+ * and both sides reported themselves healthy. Recovery only came when the node process
+ * happened to restart.
+ */
+describe("heartbeat for a node the gateway has forgotten", () => {
+  it("answers 404 so the daemon knows to re-register", async () => {
+    const { app } = buildApp();
+    const operator = makeOperator();
+
+    const res = await request(app)
+      .post("/v1/nodes/ghost/heartbeat")
+      .send(makeSignedHeartbeat(operator, { nodeId: "ghost" }));
+
+    // 400 here is what silently killed the mesh: the daemon would never retry registration.
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe("not_found");
+  });
+
+  it("still rejects a forged heartbeat with 401, not 404", async () => {
+    // The 404 path must not become a way to skip signature verification for a known node.
+    const { app } = await withRegisteredNode();
+    const res = await request(app)
+      .post("/v1/nodes/node-alpha/heartbeat")
+      .send(makeSignedHeartbeat(makeOperator()));
+    expect(res.status).toBe(401);
+  });
+});

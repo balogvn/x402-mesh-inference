@@ -281,7 +281,8 @@ describe("POST /v1/nodes/:id/heartbeat", () => {
       .post("/v1/nodes/ghost/heartbeat")
       .send(makeSignedHeartbeat(operator, { nodeId: "ghost" }));
 
-    expect(response.status).toBe(400);
+    // 404, not 400 — this is what tells the daemon to re-register after a gateway restart.
+    expect(response.status).toBe(404);
     expect(response.body.error.message).toContain("register before sending heartbeats");
   });
 });

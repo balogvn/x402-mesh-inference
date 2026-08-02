@@ -131,6 +131,22 @@ export class ValidationError extends MeshError {
   }
 }
 
+/**
+ * The addressed resource does not exist.
+ *
+ * Distinct from {@link ValidationError} on purpose: a node heartbeating against a gateway
+ * that has forgotten it is not sending a *malformed* request, it is addressing something that
+ * is gone. The daemon treats 404/410 as "re-register and carry on" and a 400 as "my request
+ * is wrong, retrying will not help", so conflating the two left a node heartbeating into a
+ * void forever after any gateway restart — the mesh silently lost capacity with both sides
+ * reporting healthy.
+ */
+export class NotFoundError extends MeshError {
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, "not_found", 404, details);
+  }
+}
+
 /** The x402 payment leg is missing, malformed or was rejected. */
 export class PaymentError extends MeshError {
   constructor(message: string, details?: Record<string, unknown>) {

@@ -13,6 +13,7 @@ import {
   AuthError,
   canonicalHeartbeatBytes,
   canonicalRegistrationBytes,
+  NotFoundError,
   parseOrThrow,
   SignedNodeHeartbeatSchema,
   SignedNodeRegistrationSchema,
@@ -271,7 +272,11 @@ async function handleHeartbeat(
   // meaningless: an attacker would simply sign with their own key and name it.
   const existing = await deps.store.get(nodeId);
   if (existing === undefined) {
-    throw new ValidationError("unknown node; register before sending heartbeats", { nodeId });
+    // 404, not 400: the node's request is well-formed, the gateway has simply forgotten it
+    // (an in-memory registry does not survive a restart). The daemon re-registers on 404/410
+    // and gives up on 400, so returning 400 here left a healthy node heartbeating into a void
+    // forever while the mesh silently ran with no capacity.
+    throw new NotFoundError("unknown node; register before sending heartbeats", { nodeId });
   }
 
   // The signed nodeId must match the path, or a heartbeat signed for node A could be
@@ -295,7 +300,7 @@ async function handleHeartbeat(
 
   const updated = await deps.store.heartbeat(nodeId, now());
   if (updated === undefined) {
-    throw new ValidationError("unknown node; register before sending heartbeats", { nodeId });
+    throw new NotFoundError("unknown node; register before sending heartbeats", { nodeId });
   }
 
   res.status(200).json({

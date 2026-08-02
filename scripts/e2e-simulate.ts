@@ -207,9 +207,16 @@ function stubPayer(keypair: AlgorandKeypair): Payer {
  * Only reachable when `AVM_PRIVATE_KEY` is present. The key is passed straight to the SDK and
  * never logged, never echoed and never included in an error message.
  */
-function realPayer(privateKeyB64: string, network: Network): Payer {
+function realPayer(privateKeyB64: string, _network: Network): Payer {
   const signer = avm.toClientAvmSigner(privateKeyB64);
-  const client = new x402Client().register(network, new ClientExactAvmScheme(signer));
+  // Registered against the `algorand:*` wildcard rather than a specific network id.
+  //
+  // The client matches a challenge's `network` verbatim, and a server may legitimately
+  // advertise either CAIP-2 encoding: the canonical truncated hash, or the full padded
+  // genesis hash the facilitator uses. Registering one form makes the other unpayable with
+  // "No network/scheme registered for x402 version: 2" — which is the same truncation trap
+  // that stopped the gateway booting, mirrored onto the client. The wildcard matches both.
+  const client = new x402Client().register("algorand:*", new ClientExactAvmScheme(signer));
   const http = new x402HTTPClient(client);
   return {
     kind: "real",
@@ -559,11 +566,36 @@ async function main(): Promise<number> {
     const mode = target.stub ? "stub (in-process, no chain)" : `live (${target.baseUrl})`;
     checklist.pass("mode", mode);
 
-    node = await startMockNode({ models: [model] });
-    checklist.pass("mock node", `${node.url} serving ${model}`);
+    // Against a deployed gateway that already has real nodes, spawning a mock is both
+    // unnecessary and impossible: the mock listens on loopback, and a public gateway's SSRF
+    // guard rightly refuses to register a private endpoint. `--use-registered-node` verifies
+    // the mesh as actually deployed instead of standing up a parallel one.
+    const useRegistered = args.flags.has("use-registered-node");
 
     await waitForGateway(target.baseUrl);
     checklist.pass("gateway healthy", `${target.baseUrl}/healthz`);
+
+    if (!useRegistered) {
+      node = await startMockNode({ models: [model] });
+      checklist.pass("mock node", `${node.url} serving ${model}`);
+    }
+
+    if (useRegistered) {
+      const listed = await fetch(`${target.baseUrl}/v1/nodes`, {
+        signal: AbortSignal.timeout(20_000),
+      });
+      const body = (await listed.json()) as { nodes?: { nodeId: string; routable?: boolean }[] };
+      const routable = (body.nodes ?? []).filter((n) => n.routable !== false);
+      expect(
+        checklist,
+        routable.length > 0,
+        "gateway has a routable node",
+        routable.length > 0
+          ? routable.map((n) => n.nodeId).join(", ")
+          : "none registered — a paid request would return 503",
+      );
+      if (routable.length === 0) return checklist.summarize();
+    }
 
     const nodeId = `e2e-mock-${Date.now().toString(36)}`;
     const capabilities: NodeCapability[] = [
@@ -572,27 +604,31 @@ async function main(): Promise<number> {
     const registration = buildSignedRegistration({
       nodeId,
       keypair: operatorKeypair,
-      endpoint: node.url,
+      endpoint: node?.url ?? "",
       network,
       capabilities,
     });
 
-    const registerResponse = await fetch(`${target.baseUrl}/v1/nodes/register`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(registration),
-      signal: AbortSignal.timeout(20_000),
-    });
-    const registered = registerResponse.status === 200 || registerResponse.status === 201;
-    expect(
-      checklist,
-      registered,
-      "mock node registered",
-      registered
-        ? `${nodeId} -> ${operatorKeypair.address}`
-        : `status ${registerResponse.status}: ${(await registerResponse.text()).slice(0, 300)}`,
-    );
-    if (!registered) return checklist.summarize();
+    const registerResponse = useRegistered
+      ? undefined
+      : await fetch(`${target.baseUrl}/v1/nodes/register`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(registration),
+          signal: AbortSignal.timeout(20_000),
+        });
+    if (registerResponse !== undefined) {
+      const registered = registerResponse.status === 200 || registerResponse.status === 201;
+      expect(
+        checklist,
+        registered,
+        "mock node registered",
+        registered
+          ? `${nodeId} -> ${operatorKeypair.address}`
+          : `status ${registerResponse.status}: ${(await registerResponse.text()).slice(0, 300)}`,
+      );
+      if (!registered) return checklist.summarize();
+    }
 
     const challenge = await assertChallenge(checklist, target.baseUrl, model, network);
     if (challenge === undefined) return checklist.summarize();
@@ -620,18 +656,23 @@ async function main(): Promise<number> {
 
       await assertSettlementSplit(checklist, target.baseUrl, nodeId);
 
-      expect(
-        checklist,
-        node.stats.completions >= 1,
-        "node served the buffered request",
-        `${node.stats.completions} completion(s)`,
-      );
-      expect(
-        checklist,
-        node.stats.streams >= 1,
-        "node served the streamed request",
-        `${node.stats.streams} stream(s)`,
-      );
+      // Only assertable when the harness owns the node. Against a deployed mesh the node is
+      // a separate process, so the proof it served the request is the completion itself
+      // plus the on-chain settlement, both already asserted above.
+      if (node !== undefined) {
+        expect(
+          checklist,
+          node.stats.completions >= 1,
+          "node served the buffered request",
+          `${node.stats.completions} completion(s)`,
+        );
+        expect(
+          checklist,
+          node.stats.streams >= 1,
+          "node served the streamed request",
+          `${node.stats.streams} stream(s)`,
+        );
+      }
     }
 
     heading("Economics asserted");
