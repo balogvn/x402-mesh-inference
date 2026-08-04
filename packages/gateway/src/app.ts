@@ -214,7 +214,7 @@ export function createApp(deps: GatewayDeps): Express {
   // for discovery or for a health check.
   app.use(createLandingRouter({ config }));
   app.use(createChatUiRouter({ config }));
-  app.use(createQuickstartRouter({ config }));
+  app.use(createQuickstartRouter({ config, store: deps.store }));
   app.use(createHealthRouter(buildHealthDeps(deps, logger, now)));
   app.use(
     createDiscoveryRouter({ config, logger, ...(deps.specDir ? { specDir: deps.specDir } : {}) }),

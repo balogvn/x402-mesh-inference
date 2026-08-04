@@ -1,5 +1,6 @@
 import type { GatewayConfig } from "@x402-mesh/shared";
 import { Router } from "express";
+import type { NodeStorePort } from "../ports.js";
 import { EXAMPLE_REQUEST, PAID_ROUTE_PATH } from "../x402/routes.js";
 
 /**
@@ -31,6 +32,41 @@ import { EXAMPLE_REQUEST, PAID_ROUTE_PATH } from "../x402/routes.js";
 /** Collaborators the quickstart route needs. */
 export interface QuickstartRouteDeps {
   config: GatewayConfig;
+  /**
+   * Live node registry, used only to name a model the mesh can actually serve.
+   *
+   * Without this the snippet fell back to {@link EXAMPLE_REQUEST}'s illustrative model id,
+   * and the first deployment to run it advertised a completely different one — so the copy
+   * a developer pasted paid the fallback price and then failed to route, which is the worst
+   * possible outcome for a page whose entire promise is that it works unmodified.
+   *
+   * Optional: when absent, or when no node is registered, the static example is used.
+   */
+  store?: NodeStorePort;
+}
+
+/**
+ * Picks a model to put in the snippet.
+ *
+ * First capability of the first registered node, which is the same set `/v1/nodes` reports
+ * and therefore the same set the router will select from. Falls back to the static example
+ * when the mesh is empty, so the page still renders something copy-pasteable.
+ */
+export async function servableModel(store: NodeStorePort | undefined): Promise<string> {
+  if (store === undefined) return EXAMPLE_REQUEST.model;
+  try {
+    const nodes = await store.list();
+    for (const node of nodes) {
+      // Capabilities hang off the signed registration, not off the record. Reading
+      // `node.capabilities` compiles to `undefined` and silently degrades to the fallback —
+      // which is exactly how the wrong model reached production the first time.
+      const model = node.registration.capabilities[0]?.model;
+      if (model !== undefined && model !== "") return model;
+    }
+  } catch {
+    // A registry hiccup must not take down a documentation page.
+  }
+  return EXAMPLE_REQUEST.model;
 }
 
 /** Escapes text for safe interpolation into HTML. */
@@ -43,7 +79,7 @@ function escapeHtml(value: string): string {
 }
 
 /** The three shell commands, in order. */
-export function quickstartShell(config: GatewayConfig): string {
+export function quickstartShell(config: GatewayConfig, model: string): string {
   return [
     "# 1. See what each model costs. Free, no wallet, no key.",
     `curl -s ${config.publicBaseUrl}/v1/pricing`,
@@ -51,7 +87,7 @@ export function quickstartShell(config: GatewayConfig): string {
     "# 2. See the payment challenge for a request you have not paid for.",
     `curl -si -X POST ${config.publicBaseUrl}${PAID_ROUTE_PATH} \\`,
     '  -H "content-type: application/json" \\',
-    `  -d '{"model":"${EXAMPLE_REQUEST.model}","messages":[{"role":"user","content":"hi"}]}' \\`,
+    `  -d '{"model":"${model}","messages":[{"role":"user","content":"hi"}]}' \\`,
     "  | grep -i payment-required",
     "",
     "# 3. Install the client and pay it.",
@@ -65,7 +101,7 @@ export function quickstartShell(config: GatewayConfig): string {
  * Kept to one file with no local imports so it survives being copied into a scratch directory,
  * which is what a developer evaluating this will actually do.
  */
-export function quickstartClient(config: GatewayConfig): string {
+export function quickstartClient(config: GatewayConfig, model: string): string {
   return `// pay.mjs — a complete paid request against ${config.publicBaseUrl}
 // Run: AVM_PRIVATE_KEY=<base64 64-byte Algorand secret key> node pay.mjs
 //
@@ -80,7 +116,7 @@ import { decodePaymentRequiredHeader } from "@x402/core/http";
 const ENDPOINT = "${config.publicBaseUrl}${PAID_ROUTE_PATH}";
 const body = {
   // Any model a healthy node advertises at ${config.publicBaseUrl}/v1/nodes.
-  model: "${EXAMPLE_REQUEST.model}",
+  model: "${model}",
   messages: [{ role: "user", content: "Reply with one word." }],
 };
 
@@ -120,16 +156,16 @@ console.log("settled:", paid.headers.get("payment-response") ? "yes" : "pending"
 }
 
 /** Plain-text rendering, for curl and for agents. */
-export function quickstartText(config: GatewayConfig): string {
+export function quickstartText(config: GatewayConfig, model: string): string {
   return [
     "x402 Mesh Inference — integration in three steps",
     "=".repeat(48),
     "",
-    quickstartShell(config),
+    quickstartShell(config, model),
     "",
     "-".repeat(48),
     "",
-    quickstartClient(config),
+    quickstartClient(config, model),
     "",
     "-".repeat(48),
     "",
@@ -146,33 +182,41 @@ export function createQuickstartRouter(deps: QuickstartRouteDeps): Router {
   const router = Router();
   const { config } = deps;
 
-  router.get("/quickstart", (req, res) => {
+  router.get("/quickstart", (req, res, next) => {
+    // Short cache: the model name tracks a live registry, so a page cached for hours would
+    // outlive the node it names.
     res.setHeader("cache-control", "public, max-age=60");
-    // `req.accepts` returns false when the client rejects both, in which case plain text is
-    // the more useful default — a machine client is likelier than a picky browser here.
-    if (req.accepts(["text/plain", "text/html"]) === "text/html") {
-      res.setHeader("content-type", "text/html; charset=utf-8");
-      res.status(200).send(renderHtml(config));
-      return;
-    }
-    res.setHeader("content-type", "text/plain; charset=utf-8");
-    res.status(200).send(quickstartText(config));
+    servableModel(deps.store)
+      .then((model) => {
+        // `req.accepts` returns false when the client rejects both, in which case plain text
+        // is the more useful default — a machine client is likelier than a picky browser.
+        if (req.accepts(["text/plain", "text/html"]) === "text/html") {
+          res.setHeader("content-type", "text/html; charset=utf-8");
+          res.status(200).send(renderHtml(config, model));
+          return;
+        }
+        res.setHeader("content-type", "text/plain; charset=utf-8");
+        res.status(200).send(quickstartText(config, model));
+      })
+      .catch(next);
   });
 
   // Directly fetchable so `curl -O` yields a file that runs.
-  router.get("/quickstart/pay.mjs", (_req, res) => {
+  router.get("/quickstart/pay.mjs", (_req, res, next) => {
     res.setHeader("content-type", "text/javascript; charset=utf-8");
     res.setHeader("cache-control", "public, max-age=60");
-    res.status(200).send(quickstartClient(config));
+    servableModel(deps.store)
+      .then((model) => res.status(200).send(quickstartClient(config, model)))
+      .catch(next);
   });
 
   return router;
 }
 
 /** Renders the browser view. Self-contained: no CDN, no bundler, no external asset. */
-function renderHtml(config: GatewayConfig): string {
-  const shell = escapeHtml(quickstartShell(config));
-  const client = escapeHtml(quickstartClient(config));
+function renderHtml(config: GatewayConfig, model: string): string {
+  const shell = escapeHtml(quickstartShell(config, model));
+  const client = escapeHtml(quickstartClient(config, model));
   const base = escapeHtml(config.publicBaseUrl);
 
   return `<!doctype html>

@@ -33,6 +33,20 @@ primary_region = "iad"
   # Update this if you rename the app or attach a custom domain.
   MESH_PUBLIC_BASE_URL = "https://x402-mesh-gateway.fly.dev"
 
+  # Per-model prices. The flat MESH_INBOUND_PRICE_USDC ($0.0020) still applies to anything
+  # not listed here.
+  #
+  # llama-3.3-70b-versatile is the only model the mesh currently serves, and at the flat
+  # price it was break-even at best: 1500 bps of $0.0020 is $0.0003 of margin, and the
+  # payout transaction costs 0.001 ALGO — about $0.0003 at ALGO $0.30. Every request netted
+  # zero, and above that ALGO price each one lost money. At $0.0060 the margin is $0.0009
+  # against the same fixed fee, so the unit economics clear the chain cost with room.
+  #
+  # Batching payouts is the structural fix — one fee amortized over N requests rather than
+  # one fee each — and it is not implemented yet. This price makes the current design
+  # solvent in the meantime; it does not make the fee go away.
+  MESH_MODEL_PRICES = '{"llama-3.3-70b-versatile":"0.0060"}'
+
   # A publicly reachable gateway must not accept node endpoints on private address space —
   # that is the SSRF guard. Leave this false here; it is only relaxed for local development.
   MESH_ALLOW_PRIVATE_NODE_ENDPOINTS = "false"
