@@ -76,6 +76,7 @@ export function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfi
     facilitatorUrl: "https://facilitator.example.test",
     payToAddress: TEST_PAY_TO,
     inboundPriceUsdc: "0.0020",
+    modelPricesUsdc: {},
     marginBps: 1500,
     publicBaseUrl: "https://mesh.test",
     requireUsdcOptIn: true,

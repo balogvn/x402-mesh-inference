@@ -1,5 +1,5 @@
 import type { GatewayConfig } from "@x402-mesh/shared";
-import { SettlementError } from "@x402-mesh/shared";
+import { priceTiers, resolveModelPrice, SettlementError } from "@x402-mesh/shared";
 import type { x402ResourceServer } from "@x402/core/server";
 import { paymentMiddleware } from "@x402/express";
 import { createPaywall } from "@x402/paywall";
@@ -25,6 +25,7 @@ import { createLandingRouter } from "./routes/landing.js";
 import { createChatUiRouter } from "./routes/chat-ui.js";
 import { createHealthRouter } from "./routes/health.js";
 import { createNodeRouter } from "./routes/nodes.js";
+import { createQuickstartRouter } from "./routes/quickstart.js";
 import { HttpNodeRouter } from "./services/router.js";
 import { parseInboundAmount } from "./services/settlement.js";
 import { buildRoutesConfig } from "./x402/routes.js";
@@ -115,6 +116,66 @@ function browserPaywall(): NonNullable<Parameters<typeof paymentMiddleware>[3]> 
   return paywallProvider as NonNullable<Parameters<typeof paymentMiddleware>[3]>;
 }
 
+/**
+ * Builds the payment middleware, one instance per distinct price.
+ *
+ * A single {@link RoutesConfig} carries a single price, and `paymentMiddleware` closes over it
+ * at construction. So per-model pricing cannot be done by mutating the shared routes object
+ * before each request: the middleware awaits the facilitator between reading the price and
+ * issuing the challenge, so two concurrent requests for differently-priced models would
+ * interleave and one client would be quoted the other's price. On a payment path that is a
+ * money bug, not a cosmetic one.
+ *
+ * Instead each price gets its own immutable middleware, and the dispatcher below picks one by
+ * the model in the request body. Nothing is shared and nothing is mutated, so concurrency is
+ * a non-issue by construction.
+ *
+ * When no per-model prices are configured there is exactly one tier, and this returns that
+ * middleware directly — behaviourally identical to the flat-price gateway it replaces.
+ */
+function priceTierDispatch(deps: GatewayDeps, logger: Logger): express.RequestHandler {
+  const config = deps.config;
+  const resourceServer = deps.resourceServer as x402ResourceServer;
+  const sync = deps.syncFacilitatorOnStart ?? true;
+
+  const build = (priceUsdc: string): express.RequestHandler =>
+    paymentMiddleware(
+      buildRoutesConfig(config, priceUsdc),
+      resourceServer,
+      PAYWALL_CONFIG,
+      // Browser-facing payment UI. `paymentMiddleware` only reaches for this when the
+      // request advertises `Accept: text/html`; an agent sending `application/json` still
+      // gets the machine-readable 402 with the `payment-required` header, untouched. So
+      // this adds a human path without altering the protocol path at all.
+      browserPaywall(),
+      sync,
+    );
+
+  const tiers = priceTiers(config.modelPricesUsdc, config.inboundPriceUsdc);
+  const fallback = build(config.inboundPriceUsdc);
+  if (tiers.length === 1) return fallback;
+
+  const byPrice = new Map(tiers.map((price) => [price, build(price)]));
+  logger.info(
+    { tiers: tiers.length, models: Object.keys(config.modelPricesUsdc).length },
+    "per-model pricing enabled",
+  );
+
+  return (req, res, next) => {
+    const body: unknown = req.body;
+    const model =
+      typeof body === "object" && body !== null && "model" in body
+        ? (body as { model?: unknown }).model
+        : undefined;
+    const price = resolveModelPrice(
+      config.modelPricesUsdc,
+      config.inboundPriceUsdc,
+      typeof model === "string" ? model : undefined,
+    );
+    (byPrice.get(price) ?? fallback)(req, res, next);
+  };
+}
+
 /** A chain reader that reports nothing as opted in. */
 const NO_CHAIN: ChainReaderPort = {
   isOptedIn: () => Promise.resolve(false),
@@ -153,6 +214,7 @@ export function createApp(deps: GatewayDeps): Express {
   // for discovery or for a health check.
   app.use(createLandingRouter({ config }));
   app.use(createChatUiRouter({ config }));
+  app.use(createQuickstartRouter({ config }));
   app.use(createHealthRouter(buildHealthDeps(deps, logger, now)));
   app.use(
     createDiscoveryRouter({ config, logger, ...(deps.specDir ? { specDir: deps.specDir } : {}) }),
@@ -167,7 +229,6 @@ export function createApp(deps: GatewayDeps): Express {
     }),
   );
 
-  const routes = buildRoutesConfig(config);
   const paidPath = "/v1/chat/completions";
 
   app.use(
@@ -181,19 +242,11 @@ export function createApp(deps: GatewayDeps): Express {
 
   if (deps.resourceServer !== undefined) {
     attachSettlementHook(deps.resourceServer, deps.settlement, logger);
-    app.use(
-      paymentMiddleware(
-        routes,
-        deps.resourceServer,
-        PAYWALL_CONFIG,
-        // Browser-facing payment UI. `paymentMiddleware` only reaches for this when the
-        // request advertises `Accept: text/html`; an agent sending `application/json` still
-        // gets the machine-readable 402 with the `payment-required` header, untouched. So
-        // this adds a human path without altering the protocol path at all.
-        browserPaywall(),
-        deps.syncFacilitatorOnStart ?? true,
-      ),
-    );
+    // Deliberately mounted with no path prefix. `paymentMiddleware` matches the route key
+    // `POST /v1/chat/completions` against the request path itself, and Express strips a mount
+    // path from `req.url` — mounting this at `paidPath` would leave the middleware looking at
+    // `/` and silently guarding nothing.
+    app.use(priceTierDispatch(deps, logger));
   } else {
     logger.warn({}, "no x402 resource server supplied: the paid route is UNGUARDED");
   }

@@ -13,6 +13,7 @@ import {
   ICON_PATH,
   maxTimeoutSeconds,
   PAID_ROUTE_PATH,
+  pricingTable,
   resourceUrl,
   SERVICE_DESCRIPTION,
   SERVICE_NAME,
@@ -64,6 +65,33 @@ export function createDiscoveryRouter(deps: DiscoveryRouteDeps): Router {
     res.setHeader("content-type", "text/plain; charset=utf-8");
     res.setHeader("cache-control", "public, max-age=60");
     res.status(200).send(buildLlmsTxt(deps.config, readTemplate(specDir, LLMS_FILE, deps.logger)));
+  });
+
+  // Free by necessity: a client cannot decide whether a model is worth paying for until it
+  // knows what that model costs, and the only alternative — one 402 probe per model — is a
+  // round trip per price.
+  router.get("/v1/pricing", (_req, res) => {
+    const table = pricingTable(deps.config);
+    res.setHeader("cache-control", "public, max-age=60");
+    res.status(200).json({
+      asset: usdcAssetId(deps.config.network),
+      decimals: 6,
+      network: deps.config.network,
+      per: "request",
+      default: {
+        usdc: table.default,
+        display: `$${table.default}`,
+        atomic: atomicToWire(usdcToAtomic(table.default)),
+      },
+      models: table.models.map((m) => ({
+        ...m,
+        atomic: atomicToWire(usdcToAtomic(m.usdc)),
+      })),
+      note:
+        "Models not listed are charged the default price. Prices are per request, not per " +
+        "token. Send the model in the request body and the 402 challenge quotes its price.",
+      resource: resourceUrl(deps.config),
+    });
   });
 
   // Referenced by the Bazaar `iconUrl`, so it has to actually resolve.
@@ -203,6 +231,12 @@ function liveBlock(config: GatewayConfig): string {
     "",
     `- endpoint: ${resourceUrl(config)}`,
     `- price: $${config.inboundPriceUsdc} USDC per request (${atomic} atomic units, 6 decimals)`,
+    ...(Object.keys(config.modelPricesUsdc).length > 0
+      ? [
+          "- pricing: per-model; the price above applies to any model not listed below",
+          ...pricingTable(config).models.map((m) => `  - ${m.model}: $${m.usdc} USDC`),
+        ]
+      : []),
     `- network: ${config.network} (${config.meshNetwork})`,
     `- asset: USDC ASA ${usdcAssetId(config.network)}`,
     `- payTo: ${config.payToAddress}`,
@@ -211,6 +245,8 @@ function liveBlock(config: GatewayConfig): string {
     `- maxTimeoutSeconds: ${maxTimeoutSeconds(config)}`,
     `- tags: ${discoveryTags(config).join(", ")}`,
     `- discovery: ${config.publicBaseUrl}/.well-known/x402`,
+    `- pricing: ${config.publicBaseUrl}/v1/pricing`,
+    `- quickstart: ${config.publicBaseUrl}/quickstart (runnable client, no wallet needed to read)`,
     `- nodes: ${config.publicBaseUrl}/v1/nodes`,
     `- settlements: ${config.publicBaseUrl}/v1/settlements`,
     "",

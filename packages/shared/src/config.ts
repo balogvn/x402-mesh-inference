@@ -3,7 +3,8 @@ import type { Network } from "@x402/core/types";
 import { ConfigError } from "./errors.js";
 import type { MeshNetwork } from "./networks.js";
 import { normalizeNetwork, toCaip2, toMeshNetwork } from "./networks.js";
-import { DEFAULT_INBOUND_USDC, DEFAULT_MARGIN_BPS } from "./pricing.js";
+import type { ModelPrices } from "./pricing.js";
+import { DEFAULT_INBOUND_USDC, DEFAULT_MARGIN_BPS, parseModelPrices } from "./pricing.js";
 import { AlgorandAddressSchema, UsdcAmountSchema } from "./schemas.js";
 
 /**
@@ -175,6 +176,14 @@ export interface GatewayConfig {
   payToAddress: string;
   /** Price charged to the client per request, as a decimal USDC string. */
   inboundPriceUsdc: string;
+  /**
+   * Per-model overrides of {@link inboundPriceUsdc}, keyed by lowercased model id.
+   *
+   * A frontier model and a small one cost the gateway wildly different amounts to serve, so
+   * a single flat price is either a loss on the expensive model or an overcharge on the cheap
+   * one. Empty by default, which is exactly the old flat-price behaviour.
+   */
+  modelPricesUsdc: ModelPrices;
   /** Gateway margin in basis points. */
   marginBps: number;
   /** Externally reachable base URL, used in x402 resource declarations. */
@@ -217,6 +226,7 @@ const GatewayEnvSchema = z.object({
   X402_FACILITATOR_URL: urlField(DEFAULT_FACILITATOR_URL),
   X402_PAY_TO_ADDRESS: z.preprocess((v) => envValue(v), AlgorandAddressSchema),
   MESH_INBOUND_PRICE_USDC: usdcField(DEFAULT_INBOUND_USDC),
+  MESH_MODEL_PRICES: optionalStringField(4_096),
   MESH_MARGIN_BPS: intField(DEFAULT_MARGIN_BPS, 0, 10_000),
   MESH_PUBLIC_BASE_URL: optionalUrlField(),
   REDIS_URL: optionalStringField(),
@@ -253,6 +263,7 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
     facilitatorUrl: stripTrailingSlash(parsed.X402_FACILITATOR_URL),
     payToAddress: parsed.X402_PAY_TO_ADDRESS,
     inboundPriceUsdc: parsed.MESH_INBOUND_PRICE_USDC,
+    modelPricesUsdc: parseModelPrices(parsed.MESH_MODEL_PRICES),
     marginBps: parsed.MESH_MARGIN_BPS,
     publicBaseUrl: stripTrailingSlash(parsed.MESH_PUBLIC_BASE_URL ?? `http://localhost:${port}`),
     requireUsdcOptIn: parsed.MESH_REQUIRE_USDC_OPT_IN,

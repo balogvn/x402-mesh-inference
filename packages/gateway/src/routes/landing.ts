@@ -231,6 +231,7 @@ export function renderLanding(config: GatewayConfig): string {
     comes back — no wallet required.
   </p>
   <button id="tryBtn" type="button">Send an unpaid request</button>
+  <a href="/quickstart" style="margin-left:10px">integrate in 60s →</a>
   <a href="/chat" style="margin-left:10px">or open the chat client →</a>
   <div class="status" id="tryStatus"></div>
   <pre id="tryOut" hidden></pre>
@@ -239,6 +240,7 @@ export function renderLanding(config: GatewayConfig): string {
   <div class="links">
     <a href="/.well-known/x402">/.well-known/x402</a>
     <a href="/llms.txt">/llms.txt</a>
+    <a href="/v1/pricing">/v1/pricing</a>
     <a href="/v1/nodes">/v1/nodes</a>
     <a href="/v1/settlements">/v1/settlements</a>
     <a href="/readyz">/readyz</a>

@@ -24,6 +24,7 @@ as margin. Two on-chain money legs per request, both in integer atomic units, wi
 
 - [How it works](#how-it-works)
 - [The money, step by step](#the-money-step-by-step)
+- [Integrate in 60 seconds](#integrate-in-60-seconds)
 - [Quickstart](#quickstart)
 - [Node operator guide](#node-operator-guide)
 - [Configuration reference](#configuration-reference)
@@ -121,6 +122,57 @@ Two properties are worth calling out because they are easy to get wrong:
 - The payout can never break the client. `settleInbound` returns `void` and swallows its own
   failures into a ledger entry and an `OPERATOR ALERT` log line — the client has already been
   served by then, and a payout failure must not retroactively look like a payment failure.
+
+## Integrate in 60 seconds
+
+Every running deployment serves its own integration guide at **`/quickstart`**, with the
+JavaScript interpolated with that deployment's real base URL. Prefer it over this section: a
+README on `main` can advertise an origin or a price the deployment no longer uses.
+
+```bash
+curl -s https://x402-mesh-gateway.fly.dev/v1/pricing
+curl -sO https://x402-mesh-gateway.fly.dev/quickstart/pay.mjs
+npm i @x402/core @x402/avm && AVM_PRIVATE_KEY=<base64 secret key> node pay.mjs
+```
+
+Nothing before the third line needs a wallet, a key or an account. `GET /v1/pricing` is free
+because a client cannot decide whether a model is worth buying until it knows the price, and
+the only alternative — one `402` probe per model — is a round trip per price.
+
+The two things that make a first x402 integration fail, both already handled in `pay.mjs`:
+
+- **The challenge is in the base64 `payment-required` header, not the JSON body.** Reading the
+  body type-checks (the cast is unchecked) and yields an empty `accepts[]`, so the client
+  builds no payment and the retry `402`s again with no diagnostic.
+- **Register the `algorand:*` wildcard, not the canonical network constant.** A client matches
+  the challenge's `network` verbatim, and this server advertises the facilitator's
+  full-genesis-hash form. Registering the constant `@x402/avm` exports fails with
+  _"No network/scheme registered for x402 version: 2"_ — an error that reads like a missing
+  import. See [docs/x402-integration-notes.md](docs/x402-integration-notes.md).
+
+### Pricing
+
+Prices are **per request**, not per token, so a client knows the exact cost before it commits.
+
+A 70B model and an 8B model cost wildly different amounts to serve, so one flat price is
+either a loss on the large model or an overcharge on the small one. Set `MESH_MODEL_PRICES` to
+price them separately:
+
+```bash
+MESH_MODEL_PRICES='{"llama-3.3-70b-versatile":"0.0060","llama-3.1-8b-instant":"0.0020"}'
+```
+
+Anything not listed is charged `MESH_INBOUND_PRICE_USDC`. Model ids match case-insensitively,
+and every price is validated at boot — a typo fails the deploy rather than a customer's
+payment. `MESH_MARGIN_BPS` applies to whichever price was quoted, so the
+`inbound − payout = margin` invariant holds per model without further configuration.
+
+Each **distinct** price becomes its own payment middleware, which is why there is a cap of 16.
+That is not an implementation detail worth hiding: a single `RoutesConfig` carries a single
+price and `paymentMiddleware` closes over it, so the alternative — mutating one shared routes
+object per request — would let two concurrent requests for differently-priced models interleave
+across the middleware's `await` on the facilitator and quote each other's price. On a payment
+path that is a money bug. Separate immutable middlewares make it impossible by construction.
 
 ## Quickstart
 
@@ -370,7 +422,8 @@ Loaded by `loadGatewayConfig()` in `packages/shared/src/config.ts`.
 | `MESH_NETWORK`                      |     |                `testnet` |        | `mainnet` \| `testnet`.                                                                             |
 | `X402_NETWORK`                      |     |       derived from above |        | Explicit CAIP-2 override; either encoding. Disagreeing with `MESH_NETWORK` is a startup error.      |
 | `X402_FACILITATOR_URL`              |     |  GoPlausible facilitator |        | `https://facilitator.goplausible.xyz`.                                                              |
-| `MESH_INBOUND_PRICE_USDC`           |     |                 `0.0020` |        | Decimal string, ≤ 6 dp. `0.0020` = `2000` atomic.                                                   |
+| `MESH_INBOUND_PRICE_USDC`           |     |                 `0.0020` |        | Decimal string, ≤ 6 dp. `0.0020` = `2000` atomic. The price for any model not priced individually.  |
+| `MESH_MODEL_PRICES`                 |     |      none (flat pricing) |        | JSON `{"model":"0.0060"}`. Case-insensitive. Validated at boot. ≤ 16 **distinct prices**.           |
 | `MESH_MARGIN_BPS`                   |     |                   `1500` |        | 0–10000. 1500 bps on 2000 atomic = 300 margin, 1700 payout, no rounding.                            |
 | `MESH_PUBLIC_BASE_URL`              |     | `http://localhost:$PORT` |        | Must be the URL clients actually reach; it is baked into challenges and the manifest.               |
 | `REDIS_URL`                         |     |        unset → in-memory |        | Node registry + settlement ledger backend.                                                          |

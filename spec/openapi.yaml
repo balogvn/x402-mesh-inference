@@ -466,6 +466,93 @@ paths:
               schema:
                 $ref: "#/components/schemas/DiscoveryManifest"
 
+  /v1/pricing:
+    get:
+      operationId: getPricing
+      tags: [operations]
+      summary: Per-model prices, in full, without paying.
+      description: |
+        Free by necessity: a client cannot decide whether a model is worth paying for until it
+        knows what that model costs, and the only alternative — one `402` probe per model — is
+        a round trip per price.
+
+        Prices are **per request**, not per token. Models absent from `models` are charged
+        `default`. The `402` challenge for a request quotes the price of the model named in
+        that request's body, so the amount here and the amount on the challenge always agree.
+      responses:
+        "200":
+          description: The price table.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [asset, decimals, network, per, default, models, resource]
+                properties:
+                  asset:
+                    type: string
+                    description: USDC ASA id as a decimal string.
+                    example: "10458941"
+                  decimals: { type: integer, example: 6 }
+                  network:
+                    type: string
+                    description: Canonical CAIP-2 network id.
+                  per:
+                    type: string
+                    enum: [request]
+                  default:
+                    $ref: "#/components/schemas/PriceQuote"
+                  models:
+                    type: array
+                    description: Per-model overrides, cheapest first. Empty under flat pricing.
+                    items:
+                      allOf:
+                        - $ref: "#/components/schemas/PriceQuote"
+                        - type: object
+                          required: [model]
+                          properties:
+                            model:
+                              type: string
+                              description: Lowercased model id.
+                              example: llama-3.3-70b-versatile
+                  note: { type: string }
+                  resource:
+                    type: string
+                    format: uri
+                    description: The paid endpoint these prices apply to.
+
+  /quickstart:
+    get:
+      operationId: getQuickstart
+      tags: [operations]
+      summary: A runnable client for this deployment.
+      description: |
+        Content-negotiated: `text/html` renders a page, anything else returns plain text. The
+        JavaScript it contains is interpolated with this deployment's own base URL, so it runs
+        unmodified against the server that served it — a checked-in README can advertise a
+        price or an origin the deployment no longer uses.
+
+        `GET /quickstart/pay.mjs` returns just the script, so `curl -O` yields a file that runs.
+      responses:
+        "200":
+          description: The integration guide.
+          content:
+            text/html:
+              schema: { type: string }
+            text/plain:
+              schema: { type: string }
+
+  /quickstart/pay.mjs:
+    get:
+      operationId: getQuickstartClient
+      tags: [operations]
+      summary: The quickstart client as a standalone ES module.
+      responses:
+        "200":
+          description: A complete paid-request client.
+          content:
+            text/javascript:
+              schema: { type: string }
+
 components:
   securitySchemes:
     x402Payment:
@@ -701,6 +788,25 @@ components:
               message: Internal server error
 
   schemas:
+    PriceQuote:
+      type: object
+      description: |
+        One price, given three ways so no consumer has to convert. `atomic` is authoritative —
+        it is the integer the payment carries — and `usdc`/`display` are renderings of it.
+      required: [usdc, display, atomic]
+      properties:
+        usdc:
+          type: string
+          description: Decimal USDC string, at most 6 decimal places.
+          example: "0.0060"
+        display:
+          type: string
+          example: "$0.0060"
+        atomic:
+          type: string
+          description: Integer atomic units (6 decimals) as a decimal string.
+          example: "6000"
+
     MeshError:
       type: object
       description: |

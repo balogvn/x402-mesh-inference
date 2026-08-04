@@ -95,9 +95,31 @@ export function resourceUrl(config: GatewayConfig): string {
   return `${config.publicBaseUrl}${PAID_ROUTE_PATH}`;
 }
 
-/** Price string in x402 `Money` form, e.g. `"$0.0020"`. */
-export function priceString(config: GatewayConfig): string {
-  return `$${config.inboundPriceUsdc}`;
+/**
+ * Price string in x402 `Money` form, e.g. `"$0.0020"`.
+ *
+ * @param priceUsdc - Overrides the flat configured price; supplied when building a
+ * per-model tier. Defaults to {@link GatewayConfig.inboundPriceUsdc}.
+ */
+export function priceString(config: GatewayConfig, priceUsdc?: string): string {
+  return `$${priceUsdc ?? config.inboundPriceUsdc}`;
+}
+
+/**
+ * The per-model price table as an agent-readable object, cheapest first.
+ *
+ * Advertised in the 402 preview and served from `GET /v1/pricing`, because a client that
+ * cannot see prices before paying has to probe one model at a time to find out what anything
+ * costs.
+ */
+export function pricingTable(config: GatewayConfig): {
+  default: string;
+  models: { model: string; usdc: string; display: string }[];
+} {
+  const models = Object.entries(config.modelPricesUsdc)
+    .map(([model, usdc]) => ({ model, usdc, display: `$${usdc}` }))
+    .sort((a, b) => (usdcToAtomic(a.usdc) < usdcToAtomic(b.usdc) ? -1 : 1));
+  return { default: config.inboundPriceUsdc, models };
 }
 
 /**
@@ -115,11 +137,11 @@ export function discoveryTags(config: GatewayConfig): string[] {
  * a route's network against the facilitator's `/supported` list verbatim at startup. Asset
  * resolution still keys off the canonical id — see {@link facilitatorNetwork}.
  */
-export function buildPaymentOption(config: GatewayConfig): ResourceConfig {
+export function buildPaymentOption(config: GatewayConfig, priceUsdc?: string): ResourceConfig {
   return {
     scheme: "exact",
     payTo: config.payToAddress,
-    price: priceString(config),
+    price: priceString(config, priceUsdc),
     network: facilitatorNetwork(config.network),
     maxTimeoutSeconds: maxTimeoutSeconds(config),
   };
@@ -135,11 +157,14 @@ export function buildPaymentOption(config: GatewayConfig): ResourceConfig {
  * supplying it is a type error.
  *
  * @param config - Resolved gateway configuration; price, network and payTo all come from it.
+ * @param priceUsdc - Price this instance quotes. The gateway builds one routes config per
+ * distinct price tier so that a 402 quotes the price of the model actually requested;
+ * omitted, it quotes the flat configured price.
  */
-export function buildRoutesConfig(config: GatewayConfig): RoutesConfig {
+export function buildRoutesConfig(config: GatewayConfig, priceUsdc?: string): RoutesConfig {
   return {
     [PAID_ROUTE_KEY]: {
-      accepts: buildPaymentOption(config),
+      accepts: buildPaymentOption(config, priceUsdc),
       resource: resourceUrl(config),
       description: SERVICE_DESCRIPTION,
       mimeType: "application/json",
@@ -153,7 +178,7 @@ export function buildRoutesConfig(config: GatewayConfig): RoutesConfig {
       }),
       unpaidResponseBody: () => ({
         contentType: "application/json",
-        body: unpaidPreview(config),
+        body: unpaidPreview(config, priceUsdc),
       }),
     },
   };
@@ -166,19 +191,24 @@ export function buildRoutesConfig(config: GatewayConfig): RoutesConfig {
  * human- and agent-readable companion: what it costs, on what chain, in what asset, and what
  * to do next.
  */
-export function unpaidPreview(config: GatewayConfig): Record<string, unknown> {
-  const atomic = usdcToAtomic(config.inboundPriceUsdc);
+export function unpaidPreview(config: GatewayConfig, priceUsdc?: string): Record<string, unknown> {
+  const quoted = priceUsdc ?? config.inboundPriceUsdc;
+  const atomic = usdcToAtomic(quoted);
   return {
     service: SERVICE_NAME,
     description: SERVICE_DESCRIPTION,
     price: {
-      usdc: config.inboundPriceUsdc,
-      display: priceString(config),
+      usdc: quoted,
+      display: priceString(config, quoted),
       atomic: atomicToWire(atomic),
       asset: usdcAssetId(config.network),
       decimals: 6,
       per: "request",
     },
+    // The whole table, not just the tier this 402 quotes: an agent deciding *which* model to
+    // buy needs every price at once, and probing one model per 402 to discover them is a
+    // round trip per model.
+    pricing: { ...pricingTable(config), endpoint: `${config.publicBaseUrl}/v1/pricing` },
     // Must match `accepts[].network` exactly: an agent reads this preview to build its
     // payment, so advertising the canonical id here while the requirement carries the
     // facilitator form would hand it a value the facilitator rejects.
