@@ -946,8 +946,33 @@ Reproduce it against the live gateway with a funded, USDC-opted-in TestNet accou
 MESH_E2E_BASE_URL=https://x402-mesh-gateway.fly.dev AVM_PRIVATE_KEY=<your key> npx tsx scripts/e2e-simulate.ts --use-registered-node
 ```
 
+### MainNet settlement
+
+One real payment has been settled on Algorand **MainNet** through this deployment, which is
+what gets the service indexed on the x402 leaderboard.
+
+```
+inbound  2000 atomic USDC   U5L25DYPN3T6BX5QIJDCB6SNBNRYFVLOJVFCIRWS25HDB76YIZFA
+payout   1700 atomic USDC   BRW5GM5FQJJHLICDTTXNJH3BNRBRVP7RCS6C4FMGYTCTRPOCFO4Q
+margin    300 atomic USDC   retained
+```
+
+- [inbound on Lora](https://lora.algokit.io/mainnet/transaction/U5L25DYPN3T6BX5QIJDCB6SNBNRYFVLOJVFCIRWS25HDB76YIZFA)
+  · [on allo.info](https://allo.info/tx/U5L25DYPN3T6BX5QIJDCB6SNBNRYFVLOJVFCIRWS25HDB76YIZFA)
+- MainNet USDC is ASA `31566704`; the payer's ALGO fee was sponsored by the facilitator, so the
+  payment was gasless for the client.
+
+On-chain balances moved exactly as published: payer **−2000**, gateway **+300** retained, node
+operator **+1700**, with precisely one transfer to the operator and no double payment.
+
+> **Known issue, stated plainly:** the settlement ledger recorded this payout as `failed` with a
+> null `payoutTxId`, even though it landed on chain. An early retry hit the cold-wallet
+> underflow, a later attempt succeeded, and the service kept the last error rather than the
+> success. No money was lost and the invariant held, but the ledger is not yet trustworthy as a
+> payout record — an operator would be told they were unpaid, and a naive "retry failed payouts"
+> process would double-pay. Being fixed; see the settlement service.
+
 <!-- TODO: demo video link -->
-<!-- TODO: MainNet transaction ids, once the leaderboard payment is made (inbound + payout legs) -->
 
 ---
 

@@ -28,7 +28,8 @@
     "test:e2e-mainnet": "tsx scripts/e2e-mainnet.ts",
     "keygen": "tsx scripts/keygen.ts",
     "preflight": "tsx scripts/preflight.ts",
-    "optin": "tsx scripts/optin.ts"
+    "optin": "tsx scripts/optin.ts",
+    "mnemonic": "tsx scripts/mnemonic.ts"
   },
   "devDependencies": {
     "@eslint/js": "^9.24.0",
