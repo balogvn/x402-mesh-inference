@@ -965,12 +965,21 @@ margin    300 atomic USDC   retained
 On-chain balances moved exactly as published: payer **−2000**, gateway **+300** retained, node
 operator **+1700**, with precisely one transfer to the operator and no double payment.
 
-> **Known issue, stated plainly:** the settlement ledger recorded this payout as `failed` with a
-> null `payoutTxId`, even though it landed on chain. An early retry hit the cold-wallet
-> underflow, a later attempt succeeded, and the service kept the last error rather than the
-> success. No money was lost and the invariant held, but the ledger is not yet trustworthy as a
-> payout record — an operator would be told they were unpaid, and a naive "retry failed payouts"
-> process would double-pay. Being fixed; see the settlement service.
+> **What this run exposed, and how it was fixed.** The ledger originally recorded this payout as
+> `failed` with a null `payoutTxId` even though it had landed on chain: `pay` submitted the
+> transaction successfully and then threw while awaiting confirmation, so the service kept the
+> error instead of the success. No money was lost — the Algorand lease on every payout already
+> makes a double spend impossible, and the operator received exactly one transfer — but the
+> ledger is what an operator reads to check they were paid and what a reconciliation job reads to
+> decide what to re-send, so a false `failed` both misinforms and invites a second payment.
+>
+> The payout path now asks the chain before believing a failure. Every payout carries the note
+> `x402-mesh/payout/<requestId>`, so a committed transfer is findable after the fact; on any
+> error, and once more before declaring failure, the service looks it up and records the real
+> transaction id. Verified against this very transaction: the lookup returns
+> `BRW5GM5FQJJHLICDTTXNJH3BNRBRVP7RCS6C4FMGYTCTRPOCFO4Q` for its request id, and correctly
+> returns nothing for a truncated one. A failing lookup is treated as _unknown_, never as a
+> settlement, so a flaky indexer degrades to the old behaviour rather than inventing a payout.
 
 <!-- TODO: demo video link -->
 

@@ -331,3 +331,106 @@ describe("payout retry policy", () => {
     expect(DEFAULT_RETRY_POLICY.attempts).toBeGreaterThanOrEqual(3);
   });
 });
+
+/**
+ * Regression: a payout that landed on chain must never be recorded as failed.
+ *
+ * `pay` can submit a transaction successfully and then throw while awaiting confirmation —
+ * a timeout, a dropped socket, an algod blip. The money has moved; the caller just never
+ * heard so. Observed on Algorand MainNet: payout
+ * BRW5GM5FQJJHLICDTTXNJH3BNRBRVP7RCS6C4FMGYTCTRPOCFO4Q was committed while its ledger row
+ * read `status: failed, payoutTxId: null`.
+ *
+ * That is worse than a cosmetic accounting error. The ledger is what an operator reads to
+ * check they were paid, and what a reconciliation job reads to decide what to re-send — so a
+ * false `failed` both misinforms the operator and invites a double payment.
+ */
+describe("payout that already landed on chain", () => {
+  /** A payer whose submissions always land but whose confirmation read always throws. */
+  class LandsThenThrowsPayer {
+    readonly senderAddress = "GATEWAY";
+    attempts = 0;
+    readonly lookups: Array<{ requestId: string; receiver: string }> = [];
+
+    pay(): Promise<{ txId: string }> {
+      this.attempts += 1;
+      // Submitted fine; the confirmation wait is what fails.
+      return Promise.reject(new Error("confirmation timed out"));
+    }
+
+    findLandedPayout(requestId: string, receiver: string): Promise<{ txId: string } | undefined> {
+      this.lookups.push({ requestId, receiver });
+      return Promise.resolve({ txId: "LANDED_TX" });
+    }
+  }
+
+  it("records it as settled with the on-chain transaction id", async () => {
+    const payer = new LandsThenThrowsPayer();
+    const { service } = buildService({ payer: payer as never });
+    service.recordRouting(
+      "req-landed",
+      NODE.registration.nodeId,
+      NODE.registration.operatorAddress,
+    );
+
+    service.settleInbound(inbound("req-landed"));
+    await service.whenIdle();
+
+    const record = service.getRecord("req-landed");
+    expect(record?.status).toBe("settled");
+    expect(record?.payoutTxId).toBe("LANDED_TX");
+  });
+
+  it("stops retrying once it discovers the payout landed", async () => {
+    const payer = new LandsThenThrowsPayer();
+    const { service } = buildService({ payer: payer as never });
+    service.recordRouting("req-stop", NODE.registration.nodeId, NODE.registration.operatorAddress);
+
+    service.settleInbound(inbound("req-stop"));
+    await service.whenIdle();
+
+    // One attempt, then the chain check ends it — not the full retry budget.
+    expect(payer.attempts).toBe(1);
+    expect(payer.lookups[0]?.receiver).toBe(NODE.registration.operatorAddress);
+  });
+
+  it("still fails honestly when nothing landed", async () => {
+    class NothingLandedPayer extends LandsThenThrowsPayer {
+      override findLandedPayout(): Promise<{ txId: string } | undefined> {
+        return Promise.resolve(undefined);
+      }
+    }
+    const payer = new NothingLandedPayer();
+    const { service } = buildService({ payer: payer as never });
+    service.recordRouting("req-none", NODE.registration.nodeId, NODE.registration.operatorAddress);
+
+    service.settleInbound(inbound("req-none"));
+    await service.whenIdle();
+
+    const record = service.getRecord("req-none");
+    expect(record?.status).toBe("failed");
+    expect(record?.payoutTxId).toBeNull();
+    expect(payer.attempts).toBe(DEFAULT_RETRY_POLICY.attempts);
+  });
+
+  it("treats a lookup that throws as unknown rather than as a settlement", async () => {
+    class BrokenLookupPayer extends LandsThenThrowsPayer {
+      override findLandedPayout(): Promise<{ txId: string } | undefined> {
+        return Promise.reject(new Error("indexer unavailable"));
+      }
+    }
+    const payer = new BrokenLookupPayer();
+    const { service } = buildService({ payer: payer as never });
+    service.recordRouting(
+      "req-broken",
+      NODE.registration.nodeId,
+      NODE.registration.operatorAddress,
+    );
+
+    service.settleInbound(inbound("req-broken"));
+    await service.whenIdle();
+
+    // A flaky indexer must degrade to the old behaviour, never invent a payout.
+    expect(service.getRecord("req-broken")?.status).toBe("failed");
+  });
+});

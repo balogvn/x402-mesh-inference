@@ -95,6 +95,22 @@ export interface UsdcPayoutPort {
   readonly senderAddress: string;
   /** Submits and confirms the transfer, returning the confirmed transaction id. */
   pay(request: PayoutRequest): Promise<{ txId: string }>;
+  /**
+   * Asks the chain whether a payout for this request has already committed.
+   *
+   * `pay` can submit a transaction successfully and then throw while waiting for
+   * confirmation — a timeout, a dropped connection, an algod hiccup. The money has moved; the
+   * caller just never heard so. Without this, the ledger records `failed` for a payout that
+   * landed, which is worse than a cosmetic error: an operator is told they were not paid, and
+   * any "retry the failed payouts" reconciliation would pay them a second time.
+   *
+   * Observed on MainNet: payout BRW5GM5FQJJHLICDTTXNJH3BNRBRVP7RCS6C4FMGYTCTRPOCFO4Q landed
+   * while its ledger row said `failed` with a null payoutTxId.
+   *
+   * Optional so tests and alternative payers need not implement chain search; when absent the
+   * caller falls back to trusting `pay`, which is the old behaviour.
+   */
+  findLandedPayout?(requestId: string, receiver: string): Promise<{ txId: string } | undefined>;
 }
 
 /** The inbound (client -> gateway) leg, as reported by the facilitator after settlement. */

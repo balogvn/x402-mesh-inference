@@ -294,6 +294,31 @@ export class DoubleSettlementService implements SettlementServicePort {
         return;
       } catch (error) {
         lastError = describe(error);
+
+        // `pay` can submit successfully and then throw while awaiting confirmation, in which
+        // case the money HAS moved and only the acknowledgement was lost. Ask the chain
+        // before retrying: retrying is at best wasted work, and recording `failed` for a
+        // payout that landed tells an operator they were not paid and invites a
+        // reconciliation run to pay them twice. Observed on MainNet — payout
+        // BRW5GM5FQJJHLICDTTXNJH3BNRBRVP7RCS6C4FMGYTCTRPOCFO4Q landed while its ledger row
+        // said failed. (The Algorand lease on the payout already prevents an actual double
+        // spend; this is about the ledger telling the truth.)
+        const landed = await this.findLandedPayout(record);
+        if (landed !== undefined) {
+          this.finalizeSettled(record, landed.txId);
+          this.logger.info(
+            {
+              requestId: record.requestId,
+              nodeId: record.nodeId,
+              payoutTxId: landed.txId,
+              attempt,
+              reason: lastError,
+            },
+            "operator payout had already landed on chain; recorded as settled",
+          );
+          return;
+        }
+
         this.logger.warn(
           {
             requestId: record.requestId,
@@ -306,6 +331,18 @@ export class DoubleSettlementService implements SettlementServicePort {
         );
         if (attempt < this.retry.attempts) await this.sleep(this.backoffMs(attempt));
       }
+    }
+
+    // Last look before declaring failure: a payout submitted on the final attempt may have
+    // committed after that attempt's confirmation wait gave up.
+    const lateLanded = await this.findLandedPayout(record);
+    if (lateLanded !== undefined) {
+      this.finalizeSettled(record, lateLanded.txId);
+      this.logger.info(
+        { requestId: record.requestId, nodeId: record.nodeId, payoutTxId: lateLanded.txId },
+        "operator payout landed after the final attempt; recorded as settled",
+      );
+      return;
     }
 
     this.finalizeFailed(record, lastError);
@@ -329,6 +366,25 @@ export class DoubleSettlementService implements SettlementServicePort {
   }
 
   /** Exponential backoff with proportional jitter, clamped to `maxDelayMs`. */
+  /**
+   * Asks the payer whether a payout for this record already committed.
+   *
+   * Returns undefined both when nothing landed and when the lookup itself failed — the caller
+   * treats undefined as "keep going", so a flaky indexer degrades to the old behaviour rather
+   * than inventing a settlement.
+   *
+   * @param record - The settlement record whose payout to look for.
+   * @returns The committed transaction id, or undefined.
+   */
+  private async findLandedPayout(record: SettlementRecord): Promise<{ txId: string } | undefined> {
+    if (this.payer.findLandedPayout === undefined) return undefined;
+    try {
+      return await this.payer.findLandedPayout(record.requestId, record.operatorAddress);
+    } catch {
+      return undefined;
+    }
+  }
+
   private backoffMs(attempt: number): number {
     const exponential = this.retry.baseDelayMs * 2 ** (attempt - 1);
     const clamped = Math.min(this.retry.maxDelayMs, exponential);

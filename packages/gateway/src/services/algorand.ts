@@ -168,6 +168,48 @@ export class AlgokitUsdcPayer implements UsdcPayoutPort {
     }
     return { txId };
   }
+
+  /**
+   * Searches the chain for an already-committed payout for `requestId`.
+   *
+   * Every payout carries the note `x402-mesh/payout/<requestId>`, which makes it findable
+   * after the fact. That matters because `pay` can submit successfully and then throw while
+   * awaiting confirmation: the transfer is on chain, the caller just never learned its id.
+   *
+   * The receiver's transactions are searched rather than the sender's because the set is far
+   * smaller, and the note is matched exactly so a different request's payout to the same
+   * operator can never be mistaken for this one.
+   *
+   * @param requestId - The request whose payout to look for.
+   * @param receiver - The operator address that would have been paid.
+   * @returns The committed transaction id, or undefined if no payout has landed.
+   */
+  async findLandedPayout(
+    requestId: string,
+    receiver: string,
+  ): Promise<{ txId: string } | undefined> {
+    const wanted = `x402-mesh/payout/${requestId}`;
+    try {
+      const result = await this.algorand.client.indexer.searchForTransactions({
+        address: receiver,
+        notePrefix: Buffer.from(wanted, "utf8").toString("base64"),
+        limit: 20,
+      });
+      for (const raw of result.transactions ?? []) {
+        const t = raw as unknown as { id?: string; sender?: unknown; note?: unknown };
+        if (String(t.sender) !== this.senderAddress) continue;
+        // `notePrefix` is a prefix match, so `.../req-1` would also match `.../req-12`.
+        // Require the decoded note to equal ours exactly.
+        if (decodeNote(t.note) !== wanted) continue;
+        if (typeof t.id === "string" && t.id.length > 0) return { txId: t.id };
+      }
+      return undefined;
+    } catch {
+      // A search failure must not be read as "no payout landed" — the caller treats undefined
+      // as unknown and keeps its existing failure handling.
+      return undefined;
+    }
+  }
 }
 
 /**
@@ -178,4 +220,20 @@ export class AlgokitUsdcPayer implements UsdcPayoutPort {
  */
 export function payoutLease(requestId: string): Uint8Array {
   return new Uint8Array(createHash("sha256").update(`x402-mesh/payout/${requestId}`).digest());
+}
+
+/**
+ * Decodes an indexer `note` field to a string.
+ *
+ * The indexer returns it as base64 text or as raw bytes depending on client version, and a
+ * wrong guess here would silently make every note comparison fail — which would turn the
+ * landed-payout check into a no-op that always reports "not found".
+ *
+ * @param note - The raw note value from an indexer transaction.
+ * @returns The decoded UTF-8 note, or "" when it cannot be decoded.
+ */
+function decodeNote(note: unknown): string {
+  if (typeof note === "string") return Buffer.from(note, "base64").toString("utf8");
+  if (note instanceof Uint8Array) return Buffer.from(note).toString("utf8");
+  return "";
 }
