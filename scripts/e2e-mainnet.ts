@@ -35,9 +35,6 @@ import {
   type SettlementRecord,
 } from "@x402-mesh/shared";
 import * as avm from "@x402/avm";
-import { ExactAvmScheme as ClientExactAvmScheme } from "@x402/avm/exact/client";
-import { x402Client, x402HTTPClient } from "@x402/core/client";
-import { decodePaymentRequiredHeader } from "@x402/core/http";
 import type { PaymentRequired } from "@x402/core/types";
 import {
   BASE_MBR_MICRO_ALGO,
@@ -49,6 +46,7 @@ import {
   formatAlgo,
   resolveAlgod,
 } from "./lib/algod.js";
+import { createX402Payer, readChallenge } from "./lib/x402-client.js";
 import {
   banner,
   errorMessage,
@@ -133,20 +131,13 @@ async function fetchChallenge(
     const body = (await response.text()).slice(0, 400);
     throw new Error(`expected 402 from ${resourceUrl}, got ${response.status}: ${body}`);
   }
-  // x402 v2 carries the machine-readable challenge in the base64 `payment-required` HEADER.
-  // The JSON body is a human-readable preview with no accepts[]. Reading the body and casting
-  // it type-checks (the cast is unchecked) and then yields a challenge with nothing to pay
-  // against — which is exactly what the guard caught here. Same defect was fixed in
-  // e2e-simulate.ts and never carried across to this script.
-  const header = response.headers.get("payment-required");
-  if (header !== null && header.trim() !== "") {
-    try {
-      return { challenge: decodePaymentRequiredHeader(header), resourceUrl };
-    } catch {
-      // fall through to the body, and let the caller's accepts[] guard report it
-    }
+  // Shared with e2e-simulate.ts: the challenge lives in the base64 `payment-required` header,
+  // never in the body. Both scripts once read the body and both were wrong.
+  const challenge = readChallenge(response);
+  if (challenge === undefined) {
+    throw new Error(`${resourceUrl} answered 402 without a decodable payment-required header`);
   }
-  return { challenge: (await response.json()) as PaymentRequired, resourceUrl };
+  return { challenge, resourceUrl };
 }
 
 async function main(): Promise<number> {
@@ -350,21 +341,9 @@ async function main(): Promise<number> {
 
   // ---- The payment --------------------------------------------------------------------------
   heading("Paying");
-  // Registered against the `algorand:*` wildcard, not a specific network id.
-  //
-  // The client matches a challenge's `network` verbatim, and a server may advertise either
-  // CAIP-2 encoding: the canonical truncated hash, or the full padded genesis hash the
-  // facilitator uses. Registering one form makes the other unpayable with "No network/scheme
-  // registered for x402 version: 2". That is the same truncation trap that stopped the
-  // gateway booting and that broke the simulation harness — this is its third appearance,
-  // because the wildcard fix was applied to e2e-simulate.ts and never carried across to here.
-  const client = new x402Client().register(
-    "algorand:*",
-    new ClientExactAvmScheme(avm.toClientAvmSigner(privateKey)),
-  );
-  const http = new x402HTTPClient(client);
-  const payload = await http.createPaymentPayload(challenge);
-  const paymentHeaders = http.encodePaymentSignatureHeader(payload);
+  // Shared with e2e-simulate.ts, which is what keeps the wildcard registration and the header
+  // naming identical in both scripts.
+  const paymentHeaders = await createX402Payer(privateKey).buildHeaders(challenge);
   info(`built an atomic transaction group for ${formatUsd(amountAtomic)}`);
 
   const response = await fetch(resourceUrl, {

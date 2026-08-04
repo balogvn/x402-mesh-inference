@@ -41,9 +41,6 @@ import {
   type SettlementRecord,
 } from "@x402-mesh/shared";
 import * as avm from "@x402/avm";
-import { ExactAvmScheme as ClientExactAvmScheme } from "@x402/avm/exact/client";
-import { x402Client, x402HTTPClient } from "@x402/core/client";
-import { decodePaymentRequiredHeader } from "@x402/core/http";
 import type { Network, PaymentRequired } from "@x402/core/types";
 import {
   Checklist,
@@ -58,6 +55,7 @@ import {
 import { buildSignedRegistration, startMockNode, type MockNode } from "./lib/mock-node.js";
 import { encodeStubPayment, startStubGateway, type StubGateway } from "./lib/stub-gateway.js";
 import { generateKeypair, type AlgorandKeypair } from "./lib/ed25519.js";
+import { createX402Payer, readChallenge as sharedReadChallenge } from "./lib/x402-client.js";
 
 /** Price the harness expects the gateway to charge, in decimal USDC. */
 const EXPECTED_INBOUND_USDC = "0.0020";
@@ -214,25 +212,13 @@ function stubPayer(keypair: AlgorandKeypair): Payer {
  * never logged, never echoed and never included in an error message.
  */
 function realPayer(privateKeyB64: string, _network: Network): Payer {
-  const signer = avm.toClientAvmSigner(privateKeyB64);
-  // Registered against the `algorand:*` wildcard rather than a specific network id.
-  //
-  // The client matches a challenge's `network` verbatim, and a server may legitimately
-  // advertise either CAIP-2 encoding: the canonical truncated hash, or the full padded
-  // genesis hash the facilitator uses. Registering one form makes the other unpayable with
-  // "No network/scheme registered for x402 version: 2" — which is the same truncation trap
-  // that stopped the gateway booting, mirrored onto the client. The wildcard matches both.
-  const client = new x402Client().register("algorand:*", new ClientExactAvmScheme(signer));
-  const http = new x402HTTPClient(client);
+  // Delegated to scripts/lib/x402-client.ts so this script and e2e-mainnet.ts cannot drift
+  // apart. Both previously hand-rolled the challenge read and the scheme registration, and
+  // both were wrong in the same two ways.
+  const payer = createX402Payer(privateKeyB64);
   return {
     kind: "real",
-    buildHeader: async (challenge) => {
-      const payload = await http.createPaymentPayload(challenge);
-      // Verbatim: whatever the SDK names them is what the middleware reads.
-      const headers = http.encodePaymentSignatureHeader(payload);
-      if (Object.keys(headers).length === 0) throw new Error("client produced no payment header");
-      return headers;
-    },
+    buildHeader: (challenge) => payer.buildHeaders(challenge),
   };
 }
 
@@ -245,15 +231,7 @@ function realPayer(privateKeyB64: string, _network: Network): Payer {
  * @param response - The 402 response.
  * @returns The decoded challenge, or undefined if the header is absent or malformed.
  */
-function readChallenge(response: Response): PaymentRequired | undefined {
-  const header = response.headers.get("payment-required");
-  if (header === null) return undefined;
-  try {
-    return decodePaymentRequiredHeader(header);
-  } catch {
-    return undefined;
-  }
-}
+const readChallenge = sharedReadChallenge;
 
 /** Issues the unpaid request and validates the 402 challenge it comes back with. */
 async function assertChallenge(

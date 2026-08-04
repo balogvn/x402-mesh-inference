@@ -425,6 +425,53 @@ function validateDockerEntrypoints(checklist: Checklist): void {
   }
 }
 
+/**
+ * Checks that the e2e scripts share one x402 client implementation.
+ *
+ * e2e-simulate.ts and e2e-mainnet.ts each once hand-rolled the challenge read and the client
+ * scheme registration, and both copies were wrong in the same two ways. The fixes went to the
+ * simulation script and never reached the MainNet script — the one that cannot be casually
+ * re-run — so both bugs were rediscovered live, with real money staged.
+ *
+ * Deduplication is the actual fix; this asserts it stays deduplicated. A future edit that
+ * reaches for the SDK directly in either script fails here rather than on MainNet.
+ *
+ * @param checklist - Collector for pass/fail lines.
+ */
+function validateSharedX402Client(checklist: Checklist): void {
+  // Calls that must only ever appear in the shared module.
+  const FORBIDDEN = ["x402Client()", "encodePaymentSignatureHeader", "decodePaymentRequiredHeader"];
+  const SCRIPTS = ["scripts/e2e-simulate.ts", "scripts/e2e-mainnet.ts"];
+  const SHARED = "scripts/lib/x402-client.ts";
+
+  try {
+    readFileSync(SHARED, "utf8");
+  } catch {
+    checklist.fail("shared x402 client", `${SHARED} is missing`);
+    return;
+  }
+
+  const offenders: string[] = [];
+  for (const path of SCRIPTS) {
+    let src: string;
+    try {
+      src = readFileSync(path, "utf8");
+    } catch (e) {
+      checklist.fail("shared x402 client", `${path}: ${errorMessage(e)}`);
+      return;
+    }
+    for (const call of FORBIDDEN) {
+      if (src.includes(call)) offenders.push(`${path} calls ${call} directly`);
+    }
+  }
+
+  if (offenders.length > 0) {
+    checklist.fail("shared x402 client", offenders.join("; "));
+  } else {
+    checklist.pass("shared x402 client", `${SCRIPTS.length} scripts route through ${SHARED}`);
+  }
+}
+
 function main(): number {
   const args = parseArgs(process.argv.slice(2));
   if (wantsHelp(args)) {
@@ -447,6 +494,7 @@ function main(): number {
   validateLlmsTxt(checklist, "spec/llms.txt");
   validateEnvExample(checklist, ".env.example");
   validateDockerEntrypoints(checklist);
+  validateSharedX402Client(checklist);
   return checklist.summarize();
 }
 
