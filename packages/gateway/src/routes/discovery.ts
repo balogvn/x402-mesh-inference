@@ -19,6 +19,7 @@ import {
   ICON_PATH,
   maxTimeoutSeconds,
   PAID_ROUTE_PATH,
+  challengeExtra,
   pricingTable,
   resourceUrl,
   SERVICE_DESCRIPTION,
@@ -219,7 +220,10 @@ export function paymentRequirements(
     amount: atomicToWire(usdcToAtomic(quoted)),
     payTo: config.payToAddress,
     maxTimeoutSeconds: maxTimeoutSeconds(config),
-    extra: { name: "USDC", decimals: 6 },
+    // `tag` is what the Bazaar challenge filter reads. The manifest and the live 402 must
+    // agree on it: an entry tagged in one and not the other is exactly how this service ended
+    // up in the general catalog but absent from the hackathon leaderboard.
+    extra: { name: "USDC", decimals: 6, ...challengeExtra(config) },
   };
 }
 

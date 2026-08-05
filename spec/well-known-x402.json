@@ -20,7 +20,8 @@
           "extra": {
             "name": "USDC",
             "decimals": 6,
-            "feePayer": "ZMFK2OI7ZBD2U27ISERZC4S6LKM6WMFJPZQ4MYNJDZ2VNBNMBA67RA22AA"
+            "feePayer": "ZMFK2OI7ZBD2U27ISERZC4S6LKM6WMFJPZQ4MYNJDZ2VNBNMBA67RA22AA",
+            "tag": "x402-global-challenge"
           }
         }
       ],

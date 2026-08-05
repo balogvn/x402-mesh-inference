@@ -144,7 +144,27 @@ export function buildPaymentOption(config: GatewayConfig, priceUsdc?: string): R
     price: priceString(config, priceUsdc),
     network: facilitatorNetwork(config.network),
     maxTimeoutSeconds: maxTimeoutSeconds(config),
+    extra: challengeExtra(config),
   };
+}
+
+/**
+ * `extra` on the payment requirement, carrying the challenge tag.
+ *
+ * The tag has to be **here**, not in the route's `tags` array. Both exist, both are called
+ * tags, and only this one puts a resource on the challenge leaderboard: the Bazaar catalog
+ * reads `accepts[].extra.tag`, while `tags` is descriptive discovery metadata that the
+ * leaderboard filter never looks at. Verified against the live catalog — every entry the
+ * hackathon filter shows carries `extra.tag`, and this service, which had the tag only in
+ * `tags`, was absent from it while still appearing in the general catalog.
+ *
+ * Returned as the route's **baseline** `extra`. The AVM scheme merges its own `feePayer` in
+ * during `enrichPaymentRequiredResponse`, which is additive — so both survive to the wire.
+ * That is asserted in tests rather than assumed, because a scheme that replaced `extra`
+ * instead of merging would silently drop the tag again.
+ */
+export function challengeExtra(config: GatewayConfig): Record<string, unknown> {
+  return { tag: config.challengeTag };
 }
 
 /**
