@@ -486,6 +486,13 @@ export class DoubleSettlementService implements SettlementServicePort {
       this.flushAccrual(record.operatorAddress, "threshold");
       return;
     }
+    // Size cap, checked alongside the value threshold. Without it a batch grows unbounded
+    // whenever the value threshold is slow to be reached, and every accrual rewrites the
+    // whole record list — so the durable-write cost is quadratic in batch size.
+    if (accrual.records.length >= this.config.payoutBatchMaxRequests) {
+      this.flushAccrual(record.operatorAddress, "max-requests");
+      return;
+    }
 
     // Durably record the liability. Deliberately after the threshold check: an accrual that
     // is about to be paid this turn never needs an open record written and immediately

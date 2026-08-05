@@ -230,6 +230,19 @@ export interface GatewayConfig {
    */
   payoutBatchMinUsdc: string;
   /**
+   * Hard ceiling on how many requests one batch may accumulate.
+   *
+   * A second flush trigger alongside the value threshold, and a resource bound rather than an
+   * economic one. Each accrual rewrites the batch's whole record list to durable storage, so
+   * N requests in a batch cost O(N^2) bytes written and O(N) stored — unbounded, if only the
+   * value threshold gates it and an operator is cheap or busy enough.
+   *
+   * The economics stop improving long before this matters: at 100 requests one transaction
+   * fee is already ~0.06% of the transfer, so capping here costs essentially nothing while
+   * keeping storage predictable.
+   */
+  payoutBatchMaxRequests: number;
+  /**
    * Hard ceiling on how long an accrued payout may wait, however small the balance.
    *
    * This is the bound on both how long an operator waits to be paid and how much unpaid
@@ -282,6 +295,7 @@ const GatewayEnvSchema = z.object({
   // Floor of 1s so a misconfiguration cannot spin the flush timer; ceiling of 24h so an
   // operator's money can never be held indefinitely by a typo.
   MESH_PAYOUT_BATCH_MAX_DELAY_MS: intField(900_000, 1_000, 86_400_000),
+  MESH_PAYOUT_BATCH_MAX_REQUESTS: intField(100, 1, 10_000),
   MESH_PUBLIC_BASE_URL: optionalUrlField(),
   REDIS_URL: redisUrlField(),
   MESH_REQUIRE_USDC_OPT_IN: boolField(true),
@@ -321,6 +335,7 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
     marginBps: parsed.MESH_MARGIN_BPS,
     payoutBatchMinUsdc: parsed.MESH_PAYOUT_BATCH_MIN_USDC,
     payoutBatchMaxDelayMs: parsed.MESH_PAYOUT_BATCH_MAX_DELAY_MS,
+    payoutBatchMaxRequests: parsed.MESH_PAYOUT_BATCH_MAX_REQUESTS,
     publicBaseUrl: stripTrailingSlash(parsed.MESH_PUBLIC_BASE_URL ?? `http://localhost:${port}`),
     requireUsdcOptIn: parsed.MESH_REQUIRE_USDC_OPT_IN,
     allowPrivateNodeEndpoints: parsed.MESH_ALLOW_PRIVATE_NODE_ENDPOINTS,

@@ -133,9 +133,16 @@ ALGO `$0.30`. That is the _entire_ gateway margin on a `$0.0020` request and a t
 instead of once per request.
 
 Set `MESH_PAYOUT_BATCH_MIN_USDC` to accrue what an operator is owed and settle it in one
-transfer when the balance crosses that threshold, or when
-`MESH_PAYOUT_BATCH_MAX_DELAY_MS` elapses — whichever comes first. Ten requests batched into one
-payout moves the fee from ~33% of margin to ~3%.
+transfer. A batch flushes on whichever comes first: the balance crossing that threshold,
+`MESH_PAYOUT_BATCH_MAX_DELAY_MS` elapsing, or `MESH_PAYOUT_BATCH_MAX_REQUESTS` accumulating.
+Ten requests batched into one payout moves the fee from ~33% of margin to ~3%; at the live
+deployment's `$0.25` threshold it is ~0.12%.
+
+The request cap is a **resource** bound rather than an economic one. Each accrual rewrites the
+batch's whole record list to durable storage, so N requests cost O(N²) bytes written — gating
+only on value lets that grow without limit whenever payouts are small relative to the
+threshold. It costs nothing economically: by 100 requests the fee is already a rounding error
+against the transfer.
 
 Accruals are keyed by **operator address**, not by node, so one operator running several nodes
 is paid once. Each batch is one transaction whose amount is the exact sum of the requests it
@@ -477,7 +484,8 @@ Loaded by `loadGatewayConfig()` in `packages/shared/src/config.ts`.
 | `MESH_MODEL_PRICES`                 |     |      none (flat pricing) |        | JSON `{"model":"0.0060"}`. Case-insensitive. Validated at boot. ≤ 16 **distinct prices**.           |
 | `MESH_MARGIN_BPS`                   |     |                   `1500` |        | 0–10000. 1500 bps on 2000 atomic = 300 margin, 1700 payout, no rounding.                            |
 | `MESH_PAYOUT_BATCH_MIN_USDC`        |     |                      `0` |        | Accrue payouts until this is owed, then pay in one transaction. `0` = pay immediately.              |
-| `MESH_PAYOUT_BATCH_MAX_DELAY_MS`    |     |        `900000` (15 min) |        | Ceiling on how long an accrued payout waits. Also caps crash-loss exposure.                         |
+| `MESH_PAYOUT_BATCH_MAX_DELAY_MS`    |     |        `900000` (15 min) |        | Ceiling on how long an accrued payout waits.                                                        |
+| `MESH_PAYOUT_BATCH_MAX_REQUESTS`    |     |                    `100` |        | Second flush trigger. Bounds storage: each accrual rewrites the whole batch, so cost is O(N²).      |
 | `MESH_PUBLIC_BASE_URL`              |     | `http://localhost:$PORT` |        | Must be the URL clients actually reach; it is baked into challenges and the manifest.               |
 | `REDIS_URL`                         |     |        unset → in-memory |        | Node registry backend. **Also makes accrued payout balances durable across a hard crash.**          |
 | `MESH_REQUIRE_USDC_OPT_IN`          |     |                   `true` |        | When true, a node whose operator has not opted in is stored but never routed to.                    |

@@ -54,14 +54,20 @@ kill_timeout = "35s"
 
   # Batch operator payouts. Each payout transaction costs a flat 0.001 ALGO (~$0.0003 at ALGO
   # $0.30) whatever its size, so paying per request spent a third of the $0.0009 margin on
-  # fees. Accruing to $0.05 makes that fee ~0.6% of the transfer instead.
+  # fees. At $0.25 that fee is ~0.12% of the transfer.
   #
-  # The 2-minute ceiling is deliberately far below the 15-minute default: this deployment gets
-  # sparse, bursty traffic, and a lone request that sat unpaid for a quarter of an hour would
-  # read as broken to anyone watching /v1/settlements. It also caps how much accrued liability
-  # a hard crash could lose, since accruals live in memory. Graceful shutdown flushes them.
-  MESH_PAYOUT_BATCH_MIN_USDC = "0.05"
-  MESH_PAYOUT_BATCH_MAX_DELAY_MS = "120000"
+  # $0.05 / 2 minutes was chosen when accruals lived only in memory, so both numbers were
+  # really caps on how much unpaid liability a crash could destroy. REDIS_URL now makes them
+  # durable and crash recovery is verified against a real SIGKILL, so they can be set on
+  # economics instead of on fear.
+  #
+  # Past ~$0.25 the saving stops mattering: the fee is already a rounding error against the
+  # transfer, and every further step buys less while making operators wait longer. The
+  # 15-minute ceiling means an operator is paid at least four times an hour even if the mesh
+  # is nearly idle, which is also what keeps /v1/settlements looking alive to anyone watching.
+  # Whatever is owed in the meantime is visible at /v1/payouts/pending.
+  MESH_PAYOUT_BATCH_MIN_USDC = "0.25"
+  MESH_PAYOUT_BATCH_MAX_DELAY_MS = "900000"
 
   # A publicly reachable gateway must not accept node endpoints on private address space —
   # that is the SSRF guard. Leave this false here; it is only relaxed for local development.

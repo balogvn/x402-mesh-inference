@@ -368,3 +368,54 @@ describe("the fee saving is real", () => {
     expect(payer.payments[0]?.amountAtomic).toBe(PAYOUT_PER_REQUEST * 10n);
   });
 });
+
+describe("batch size is bounded independently of value", () => {
+  it("flushes at the request cap even when the value threshold is far away", async () => {
+    // The cap exists because every accrual rewrites the batch's whole record list to durable
+    // storage: N requests cost O(N^2) bytes written. Gating only on value lets that grow
+    // without limit whenever payouts are small relative to the threshold.
+    const payer = new StubPayer();
+    const service = new DoubleSettlementService({
+      config: makeConfig({
+        payoutBatchMinUsdc: "100.00", // unreachable
+        payoutBatchMaxRequests: 3,
+      }),
+      payer,
+      logger: silentLogger,
+      now: makeClock().now,
+      sleep: () => Promise.resolve(),
+      random: () => 0.5,
+    });
+
+    await settle(service, "r1", OPERATOR_A);
+    await settle(service, "r2", OPERATOR_A);
+    expect(payer.payments).toHaveLength(0);
+
+    await settle(service, "r3", OPERATOR_A);
+
+    expect(payer.payments).toHaveLength(1);
+    expect(payer.payments[0]?.amountAtomic).toBe(PAYOUT_PER_REQUEST * 3n);
+    expect(service.getPendingPayouts()).toHaveLength(0);
+  });
+
+  it("counts per operator, not globally", async () => {
+    const payer = new StubPayer();
+    const service = new DoubleSettlementService({
+      config: makeConfig({ payoutBatchMinUsdc: "100.00", payoutBatchMaxRequests: 3 }),
+      payer,
+      logger: silentLogger,
+      now: makeClock().now,
+      sleep: () => Promise.resolve(),
+      random: () => 0.5,
+    });
+
+    // Four requests total, but never three for the same operator.
+    await settle(service, "a1", OPERATOR_A);
+    await settle(service, "b1", OPERATOR_B);
+    await settle(service, "a2", OPERATOR_A);
+    await settle(service, "b2", OPERATOR_B);
+
+    expect(payer.payments).toHaveLength(0);
+    expect(service.getPendingPayouts()).toHaveLength(2);
+  });
+});

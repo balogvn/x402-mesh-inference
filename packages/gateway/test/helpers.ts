@@ -83,6 +83,7 @@ export function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfi
     // expectation about "one payout per request" keeps meaning what it says.
     payoutBatchMinUsdc: "0",
     payoutBatchMaxDelayMs: 900_000,
+    payoutBatchMaxRequests: 100,
     publicBaseUrl: "https://mesh.test",
     requireUsdcOptIn: true,
     // Test nodes live on loopback, so the SSRF guard is relaxed by default here. The tests
