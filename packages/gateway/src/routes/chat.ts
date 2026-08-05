@@ -5,7 +5,7 @@ import type { Request, Response } from "express";
 import type { Logger } from "../logger.js";
 import { getRequestId } from "../middleware/requestId.js";
 import type { RouterPort, SettlementServicePort, StreamSink } from "../ports.js";
-import { PAID_ROUTE_PATH } from "../x402/routes.js";
+import { PAID_ROUTE_PATHS } from "../x402/routes.js";
 
 /**
  * `POST /v1/chat/completions` — the one paid route.
@@ -37,7 +37,7 @@ export interface ChatRouteDeps {
 export function createChatRouter(deps: ChatRouteDeps): Router {
   const router = Router();
 
-  router.post(PAID_ROUTE_PATH, (req: Request, res: Response, next) => {
+  router.post([...PAID_ROUTE_PATHS], (req: Request, res: Response, next) => {
     handleChat(deps, req, res).catch(next);
   });
 

@@ -29,9 +29,14 @@ kill_timeout = "35s"
   NODE_ENV = "production"
   LOG_LEVEL = "info"
 
-  # TestNet first, deliberately. Prove the whole loop with free faucet USDC, then flip this
-  # to "mainnet" (and re-fund + re-opt-in the payout account) for the leaderboard payment.
-  MESH_NETWORK = "testnet"
+  # MainNet. The x402 Global Challenge counts MainNet settlements only — "Testnet is for
+  # validation only; it does not count toward the leaderboard" — so the whole loop was proved
+  # on TestNet and then flipped here.
+  #
+  # This is ALSO set as a Fly secret, and the secret wins over this file. Both are kept in
+  # sync deliberately: leaving this at "testnet" would mean a deploy that lost the secret
+  # silently settles on the wrong chain, which is the kind of mismatch nothing else catches.
+  MESH_NETWORK = "mainnet"
 
   # Must be the URL clients actually reach: it is baked into every 402 challenge and into
   # the discovery manifest, so a wrong value produces challenges nobody can pay against.
@@ -47,9 +52,9 @@ kill_timeout = "35s"
   # zero, and above that ALGO price each one lost money. At $0.0060 the margin is $0.0009
   # against the same fixed fee, so the unit economics clear the chain cost with room.
   #
-  # Batching payouts is the structural fix — one fee amortized over N requests rather than
-  # one fee each — and it is not implemented yet. This price makes the current design
-  # solvent in the meantime; it does not make the fee go away.
+  # Batching (below) is the structural fix and is now in place, so the fee is amortized
+  # across a batch rather than charged per request. This price and that batching are
+  # complementary, not alternatives.
   MESH_MODEL_PRICES = '{"llama-3.3-70b-versatile":"0.0060"}'
 
   # Batch operator payouts. Each payout transaction costs a flat 0.001 ALGO (~$0.0003 at ALGO

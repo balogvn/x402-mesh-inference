@@ -1,7 +1,7 @@
 import type { GatewayConfig } from "@x402-mesh/shared";
 import { atomicToWire, facilitatorNetwork, usdcAssetId, usdcToAtomic } from "@x402-mesh/shared";
 import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
-import type { ResourceConfig, RoutesConfig } from "@x402/core/server";
+import type { ResourceConfig, RouteConfig, RoutesConfig } from "@x402/core/server";
 
 /**
  * The x402 route table and the Bazaar discovery metadata attached to it.
@@ -17,6 +17,27 @@ export const PAID_ROUTE_KEY = "POST /v1/chat/completions";
 
 /** Path component of {@link PAID_ROUTE_KEY}, for mounting the Express handler. */
 export const PAID_ROUTE_PATH = "/v1/chat/completions";
+
+/**
+ * Second path serving the same paid capability.
+ *
+ * Not decoration. The Bazaar catalog snapshots a resource's `accepts` the first time it sees
+ * it and never refreshes them: this service was first indexed before the challenge tag was in
+ * `extra`, and eight subsequent settlements carrying the tag incremented its counter without
+ * touching the frozen snapshot. A resource the catalog has not seen before is indexed fresh,
+ * tag included, and a distinct path is the cheapest way to be that resource.
+ *
+ * It is a genuine endpoint, not a trick: same handler, same price, same guards, same
+ * settlement. `/v1/chat/completions` stays the canonical OpenAI-compatible path and keeps
+ * working — every client and the published quickstart continue to target it.
+ */
+export const PAID_ROUTE_ALIAS_PATH = "/v1/inference";
+
+/** Route key for {@link PAID_ROUTE_ALIAS_PATH}. */
+export const PAID_ROUTE_ALIAS_KEY = "POST /v1/inference";
+
+/** Every path that is paywalled and routes to the inference handler. */
+export const PAID_ROUTE_PATHS = [PAID_ROUTE_PATH, PAID_ROUTE_ALIAS_PATH] as const;
 
 /** Path the gateway serves its icon from, referenced by the discovery metadata. */
 export const ICON_PATH = "/static/icon.svg";
@@ -182,25 +203,28 @@ export function challengeExtra(config: GatewayConfig): Record<string, unknown> {
  * omitted, it quotes the flat configured price.
  */
 export function buildRoutesConfig(config: GatewayConfig, priceUsdc?: string): RoutesConfig {
+  const route = (path: string): RouteConfig => ({
+    accepts: buildPaymentOption(config, priceUsdc),
+    description: SERVICE_DESCRIPTION,
+    mimeType: "application/json",
+    serviceName: SERVICE_NAME,
+    iconUrl: `${config.publicBaseUrl}${ICON_PATH}`,
+    tags: discoveryTags(config),
+    extensions: declareDiscoveryExtension({
+      bodyType: "json",
+      input: EXAMPLE_REQUEST,
+      output: { example: EXAMPLE_RESPONSE },
+    }),
+    unpaidResponseBody: () => ({
+      contentType: "application/json",
+      body: unpaidPreview(config, priceUsdc),
+    }),
+    resource: `${config.publicBaseUrl}${path}`,
+  });
+
   return {
-    [PAID_ROUTE_KEY]: {
-      accepts: buildPaymentOption(config, priceUsdc),
-      resource: resourceUrl(config),
-      description: SERVICE_DESCRIPTION,
-      mimeType: "application/json",
-      serviceName: SERVICE_NAME,
-      iconUrl: `${config.publicBaseUrl}${ICON_PATH}`,
-      tags: discoveryTags(config),
-      extensions: declareDiscoveryExtension({
-        bodyType: "json",
-        input: EXAMPLE_REQUEST,
-        output: { example: EXAMPLE_RESPONSE },
-      }),
-      unpaidResponseBody: () => ({
-        contentType: "application/json",
-        body: unpaidPreview(config, priceUsdc),
-      }),
-    },
+    [PAID_ROUTE_KEY]: route(PAID_ROUTE_PATH),
+    [PAID_ROUTE_ALIAS_KEY]: route(PAID_ROUTE_ALIAS_PATH),
   };
 }
 

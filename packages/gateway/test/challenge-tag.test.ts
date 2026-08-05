@@ -107,3 +107,53 @@ describe("the challenge tag reaches the payment requirement", () => {
     expect(extra["tag"]).toBe("some-other-challenge");
   });
 });
+
+describe("the second paid path is a real endpoint, not a listing trick", () => {
+  const PATHS = ["/v1/chat/completions", "/v1/inference"];
+
+  it("paywalls both paths identically", async () => {
+    const app = buildApp();
+    for (const path of PATHS) {
+      const response = await request(app)
+        .post(path)
+        .set("accept", "application/json")
+        .send({ model: "llama3.1:8b", messages: [{ role: "user", content: "hi" }] });
+
+      expect(response.status, `${path} must be paywalled`).toBe(402);
+      const required = decodePaymentRequiredHeader(response.headers["payment-required"] as string);
+      const accepts = required.accepts[0] as { amount: string; extra?: Record<string, unknown> };
+      expect(accepts.extra?.["tag"], `${path} must carry the challenge tag`).toBe(CHALLENGE_TAG);
+    }
+  });
+
+  it("quotes the same price on both, so the alias cannot be a cheaper side door", async () => {
+    const app = buildApp();
+    const amounts: string[] = [];
+    for (const path of PATHS) {
+      const response = await request(app)
+        .post(path)
+        .set("accept", "application/json")
+        .send({ model: "llama3.1:8b", messages: [{ role: "user", content: "hi" }] });
+      const required = decodePaymentRequiredHeader(response.headers["payment-required"] as string);
+      amounts.push((required.accepts[0] as { amount: string }).amount);
+    }
+    expect(amounts[0]).toBe(amounts[1]);
+  });
+
+  it("advertises each path as its own resource URL", async () => {
+    // The catalog keys on resourceUrl. Two routes sharing one advertised resource would index
+    // as a single entry and defeat the point of having a second path at all.
+    const app = buildApp();
+    for (const path of PATHS) {
+      const response = await request(app)
+        .post(path)
+        .set("accept", "application/json")
+        .send({ model: "llama3.1:8b", messages: [{ role: "user", content: "hi" }] });
+      const required = decodePaymentRequiredHeader(
+        response.headers["payment-required"] as string,
+      ) as unknown as { resource?: { url?: string } };
+      // `resource` is an object carrying the URL, not a bare string.
+      expect(required.resource?.url, `${path} must advertise itself`).toContain(path);
+    }
+  });
+});

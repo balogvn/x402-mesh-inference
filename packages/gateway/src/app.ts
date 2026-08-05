@@ -28,7 +28,7 @@ import { createNodeRouter } from "./routes/nodes.js";
 import { createQuickstartRouter } from "./routes/quickstart.js";
 import { HttpNodeRouter } from "./services/router.js";
 import { parseInboundAmount } from "./services/settlement.js";
-import { buildRoutesConfig } from "./x402/routes.js";
+import { buildRoutesConfig, PAID_ROUTE_PATHS } from "./x402/routes.js";
 
 /**
  * Assembles the Express application.
@@ -229,7 +229,8 @@ export function createApp(deps: GatewayDeps): Express {
     }),
   );
 
-  const paidPath = "/v1/chat/completions";
+  // Both paid paths get the same rate limiting; the payment middleware self-filters on both.
+  const paidPath = [...PAID_ROUTE_PATHS];
 
   app.use(
     paidPath,

@@ -19,7 +19,9 @@ primary_region = "iad"
 [env]
   NODE_ENV = "production"
   LOG_LEVEL = "info"
-  MESH_NETWORK = "testnet"
+  # MainNet, matching the gateway. A node registered on a different network than the gateway
+  # settles on is invisible to it — the registration is rejected on the network check.
+  MESH_NETWORK = "mainnet"
 
   # The gateway this node joins.
   MESH_GATEWAY_URL = "https://x402-mesh-gateway.fly.dev"
@@ -35,7 +37,15 @@ primary_region = "iad"
   # container dies with `EACCES: permission denied 0.0.0.0:443`.
   MESH_NODE_PORT = "8500"
 
-  MESH_NODE_ID = "demo-node-01"
+  # A nodeId is permanently bound to the operator address that first registered it — that is
+  # the anti-hijack guard, and it is worth keeping. But flipping networks gives the same
+  # physical node a different operator address, so it cannot reclaim its old id: the TestNet
+  # registration of "demo-node-01" is owned by the TestNet operator forever.
+  #
+  # A distinct id per network is the honest modelling anyway. A node on MainNet paying a
+  # MainNet operator is not the same routable entity as its TestNet twin, and giving them one
+  # id is what made the two collide.
+  MESH_NODE_ID = "mesh-node-mainnet-01"
 
   # Any OpenAI-compatible backend. `openai` speaks the same wire protocol as vLLM, so this
   # works with OpenAI, Groq, Together, OpenRouter, DeepInfra, Fireworks or a self-hosted vLLM
