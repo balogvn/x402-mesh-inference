@@ -203,6 +203,7 @@ describe("NodeSelector no-capacity reporting", () => {
     expect(err.details?.registeredNodes).toBe(5);
     expect(err.details?.rejected).toEqual({
       wrongNetwork: 0,
+      stale: 0,
       unhealthy: 1,
       wrongModel: 1,
       notOptedIn: 1,
@@ -222,6 +223,7 @@ describe("NodeSelector no-capacity reporting", () => {
     if (!(outcome instanceof NoCapacityError)) throw new Error("unreachable");
     expect(outcome.details?.rejected).toEqual({
       wrongNetwork: 0,
+      stale: 0,
       unhealthy: 0,
       wrongModel: 0,
       notOptedIn: 0,
@@ -469,6 +471,55 @@ describe("a registration outlives the network it was made on", () => {
     const store = new MemoryNodeStore();
     await store.upsert(makeNode({ nodeId: "whatever", network: ALGORAND_TESTNET }));
 
+    await expect(new NodeSelector(store).select("llama3.1:8b")).resolves.toBeDefined();
+  });
+});
+
+describe("a node that stopped heartbeating stops being routable", () => {
+  /**
+   * Health is only recomputed from request outcomes, so a node that is switched off keeps its
+   * last-known `healthy: true` and keeps winning selection. The mesh only learns otherwise by
+   * losing real requests to it — each one a client charged for a completion that failed.
+   *
+   * Observed: a decommissioned node still listed healthy and routable 105 minutes after its
+   * last heartbeat.
+   */
+  const NOW = 1_000_000_000;
+
+  it("rejects a node whose last heartbeat is older than the window", async () => {
+    const store = new MemoryNodeStore();
+    await store.upsert(makeNode({ nodeId: "gone", lastSeenAt: NOW - 200_000 }));
+
+    const selector = new NodeSelector(store, { staleAfterMs: 90_000, now: () => NOW });
+    await expect(selector.select("llama3.1:8b")).rejects.toMatchObject({
+      // Reported as stale, not unhealthy: the last health reading was fine, it is just old.
+      details: { rejected: { stale: 1, unhealthy: 0 } },
+    });
+  });
+
+  it("keeps a node that heartbeated within the window", async () => {
+    const store = new MemoryNodeStore();
+    await store.upsert(makeNode({ nodeId: "alive", lastSeenAt: NOW - 30_000 }));
+
+    const selector = new NodeSelector(store, { staleAfterMs: 90_000, now: () => NOW });
+    await expect(selector.select("llama3.1:8b")).resolves.toMatchObject({
+      node: { registration: { nodeId: "alive" } },
+    });
+  });
+
+  it("tolerates a brief blip rather than evicting on one missed beat", async () => {
+    // The default window is six beats at the daemon's 15s interval; a restart must not cost a
+    // healthy node its place.
+    const store = new MemoryNodeStore();
+    await store.upsert(makeNode({ nodeId: "blip", lastSeenAt: NOW - 20_000 }));
+
+    const selector = new NodeSelector(store, { staleAfterMs: 90_000, now: () => NOW });
+    await expect(selector.select("llama3.1:8b")).resolves.toBeDefined();
+  });
+
+  it("skips the check when no window is configured", async () => {
+    const store = new MemoryNodeStore();
+    await store.upsert(makeNode({ nodeId: "ancient", lastSeenAt: 1 }));
     await expect(new NodeSelector(store).select("llama3.1:8b")).resolves.toBeDefined();
   });
 });

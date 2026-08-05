@@ -277,6 +277,21 @@ export interface GatewayConfig {
   logLevel: string;
   otelEnabled: boolean;
   otelExporterUrl?: string;
+  /**
+   * How long a node may go without heartbeating before it stops being routable.
+   *
+   * Nothing else ages a node out. Health is only recomputed from request *outcomes*, so a node
+   * that is switched off, unplugged or firewalled keeps its last-known `healthy: true` forever
+   * and the selector keeps choosing it — the mesh has to lose real requests before it notices,
+   * and each of those is a client charged for a completion that failed.
+   *
+   * Observed: a decommissioned node was still listed healthy and routable 105 minutes after
+   * its last heartbeat.
+   *
+   * Defaults to six missed beats at the daemon's default 15s interval, which is forgiving
+   * enough to ride out a restart or a brief network blip without evicting a healthy node.
+   */
+  nodeStaleAfterMs: number;
   /** Discovery tag advertised on the paid route. */
   challengeTag: string;
 }
@@ -306,6 +321,7 @@ const GatewayEnvSchema = z.object({
   LOG_LEVEL: enumField(LOG_LEVEL_VALUES, "info"),
   OTEL_ENABLED: boolField(false),
   OTEL_EXPORTER_OTLP_ENDPOINT: optionalUrlField(),
+  MESH_NODE_STALE_AFTER_MS: intField(90_000, 5_000, 3_600_000),
   X402_CHALLENGE_TAG: stringField(CHALLENGE_TAG, 64),
 });
 
@@ -344,6 +360,7 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
     maxConcurrentPerNode: parsed.MESH_MAX_CONCURRENT_PER_NODE,
     logLevel: parsed.LOG_LEVEL,
     otelEnabled: parsed.OTEL_ENABLED,
+    nodeStaleAfterMs: parsed.MESH_NODE_STALE_AFTER_MS,
     challengeTag: parsed.X402_CHALLENGE_TAG,
   };
   if (parsed.REDIS_URL !== undefined) config.redisUrl = parsed.REDIS_URL;

@@ -94,6 +94,7 @@ export function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfi
     maxConcurrentPerNode: 8,
     logLevel: "silent",
     otelEnabled: false,
+    nodeStaleAfterMs: 90_000,
     challengeTag: "x402-global-challenge",
     ...overrides,
   };

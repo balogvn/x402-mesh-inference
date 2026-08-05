@@ -59,7 +59,10 @@ async function buildDeps(
   const nodeStore = await createNodeStore(config.redisUrl);
   const store = new RegistryStoreAdapter(nodeStore);
   const selector = new RegistrySelectorAdapter(
-    new NodeSelector(nodeStore, { network: config.network }),
+    new NodeSelector(nodeStore, {
+      network: config.network,
+      staleAfterMs: config.nodeStaleAfterMs,
+    }),
     nodeStore,
   );
 

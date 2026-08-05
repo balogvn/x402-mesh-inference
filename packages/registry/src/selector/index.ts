@@ -25,6 +25,7 @@ const DEFAULT_WEIGHT_FLOOR = 0.05;
 /** Why each rejected node was excluded. Surfaced in {@link NoCapacityError} details. */
 interface RejectionTally {
   wrongNetwork: number;
+  stale: number;
   unhealthy: number;
   wrongModel: number;
   notOptedIn: number;
@@ -56,6 +57,16 @@ export interface NodeSelectorOptions {
    * unchanged, which keeps the selector usable in tests that do not care about networks.
    */
   network?: string;
+  /**
+   * How long since a node's last heartbeat before it is treated as gone.
+   *
+   * Health is otherwise only recomputed from request outcomes, so a node that stops answering
+   * keeps its last-known healthy flag and keeps winning selection until enough real requests
+   * have failed against it. Omitted, staleness is not checked.
+   */
+  staleAfterMs?: number;
+  /** Clock, injected so tests need not sleep. */
+  now?: () => number;
   /** Overrides {@link DEFAULT_WEIGHTS}. */
   weights?: ScoreWeights;
   /**
@@ -86,10 +97,14 @@ export class NodeSelector {
   readonly #rng: () => number;
   readonly #weightFloor: number;
   readonly #network: string | undefined;
+  readonly #staleAfterMs: number | undefined;
+  readonly #now: () => number;
 
   constructor(store: NodeStore, options: NodeSelectorOptions = {}) {
     this.#store = store;
     this.#network = options.network;
+    this.#staleAfterMs = options.staleAfterMs;
+    this.#now = options.now ?? Date.now;
     this.#weights = options.weights ?? DEFAULT_WEIGHTS;
     this.#rng = options.rng ?? Math.random;
     const floor = options.weightFloor ?? DEFAULT_WEIGHT_FLOOR;
@@ -114,6 +129,7 @@ export class NodeSelector {
     const records = await this.#store.list();
     const tally: RejectionTally = {
       wrongNetwork: 0,
+      stale: 0,
       unhealthy: 0,
       wrongModel: 0,
       notOptedIn: 0,
@@ -132,6 +148,16 @@ export class NodeSelector {
       // and reporting it as unhealthy would send an operator chasing a node that is fine.
       if (this.#network !== undefined && record.registration.network !== this.#network) {
         tally.wrongNetwork += 1;
+        continue;
+      }
+      // Staleness before the health flag: a node that stopped heartbeating is gone, whatever
+      // its last recorded health said. Without this the flag is a memory of when the node was
+      // last reachable, not a statement about now.
+      if (
+        this.#staleAfterMs !== undefined &&
+        this.#now() - record.health.lastSeenAt > this.#staleAfterMs
+      ) {
+        tally.stale += 1;
         continue;
       }
       if (!record.health.healthy) {
