@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { AccrualStore, PersistedAccrual } from "@x402-mesh/registry";
-import { computeSplit } from "@x402-mesh/shared";
+import { createAccrualStore } from "@x402-mesh/registry";
+import { computeSplit, loadGatewayConfig } from "@x402-mesh/shared";
 import { silentLogger } from "../src/logger.js";
 import { DoubleSettlementService } from "../src/services/settlement.js";
-import { makeClock, makeConfig, makeOperator, StubPayer } from "./helpers.js";
+import { makeClock, makeConfig, makeOperator, StubPayer, TEST_PAY_TO } from "./helpers.js";
 import type { PayoutRequest } from "../src/ports.js";
 
 /**
@@ -327,5 +328,51 @@ describe("persistence never blocks getting paid", () => {
     await service.flushPayouts();
     expect(payer.payments).toHaveLength(1);
     expect(payer.payments[0]?.amountAtomic).toBe(PAYOUT_PER_REQUEST * 2n);
+  });
+});
+
+describe("a bad REDIS_URL must never crash the gateway", () => {
+  it("is rejected at config load, naming the variable", () => {
+    // The deploy-time half: a mistyped URL should fail loudly rather than quietly disable
+    // durability. Observed in production as prose pasted in front of the URL.
+    const base = {
+      X402_PAY_TO_ADDRESS: TEST_PAY_TO,
+      MESH_NETWORK: "testnet",
+    } as NodeJS.ProcessEnv;
+
+    for (const bad of [
+      "Apps in the personal org can connect to at redis://default:pw@x.upstash.io:6379",
+      "not-a-url",
+      "http://example.com",
+      "redis//missing-colon",
+    ]) {
+      expect(() => loadGatewayConfig({ ...base, REDIS_URL: bad }), bad).toThrow(/REDIS_URL/);
+    }
+  });
+
+  it("accepts the forms Fly and Upstash actually hand out", () => {
+    const base = {
+      X402_PAY_TO_ADDRESS: TEST_PAY_TO,
+      MESH_NETWORK: "testnet",
+    } as NodeJS.ProcessEnv;
+
+    for (const good of [
+      "redis://127.0.0.1:6379",
+      "redis://default:secret@fly-x402-mesh-redis.upstash.io:6379",
+      "rediss://default:secret@eu1-abc.upstash.io:6380",
+    ]) {
+      expect(() => loadGatewayConfig({ ...base, REDIS_URL: good }), good).not.toThrow();
+    }
+  });
+
+  it("degrades instead of throwing when the client cannot be built", async () => {
+    // The runtime half. `new Redis(url)` parses eagerly and throws on a malformed URL; letting
+    // that escape killed the process at boot rather than degrading. A payout path may lose
+    // durability, but it must never refuse to start.
+    await expect(
+      createAccrualStore("Apps in the personal org can connect to at redis://x:1", {
+        logger: { warn: () => undefined },
+      }),
+    ).resolves.toBeUndefined();
   });
 });

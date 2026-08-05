@@ -100,6 +100,36 @@ function enumField<T extends readonly [string, ...string[]]>(values: T, defaultV
   return z.preprocess((v) => envValue(v) ?? defaultValue, z.enum(values));
 }
 
+/**
+ * Optional `redis://` or `rediss://` connection URL.
+ *
+ * Validated here rather than left to the client, because both consumers degrade to in-memory
+ * when the URL is unusable — the node store by design, the accrual store because a payout
+ * path must never refuse to boot. That degradation is right at runtime and wrong at deploy
+ * time: a mistyped URL would silently cost cross-replica registry state and the durability of
+ * accrued operator payouts, with nothing but a log line to say so.
+ *
+ * Observed in production: a REDIS_URL that had prose pasted in front of it passed config
+ * validation, failed to parse in the client, and left batching running with no durable store.
+ */
+function redisUrlField() {
+  return z.preprocess(
+    (v) => envValue(v),
+    z
+      .string()
+      .max(512)
+      .refine((value) => {
+        try {
+          const parsed = new URL(value);
+          return parsed.protocol === "redis:" || parsed.protocol === "rediss:";
+        } catch {
+          return false;
+        }
+      }, "must be a redis:// or rediss:// URL")
+      .optional(),
+  );
+}
+
 function usdcField(defaultValue: string) {
   return z.preprocess((v) => envValue(v) ?? defaultValue, UsdcAmountSchema);
 }
@@ -253,7 +283,7 @@ const GatewayEnvSchema = z.object({
   // operator's money can never be held indefinitely by a typo.
   MESH_PAYOUT_BATCH_MAX_DELAY_MS: intField(900_000, 1_000, 86_400_000),
   MESH_PUBLIC_BASE_URL: optionalUrlField(),
-  REDIS_URL: optionalStringField(),
+  REDIS_URL: redisUrlField(),
   MESH_REQUIRE_USDC_OPT_IN: boolField(true),
   MESH_ALLOW_PRIVATE_NODE_ENDPOINTS: boolField(false),
   MESH_TRUST_PROXY_HOPS: intField(0, 0, 10),

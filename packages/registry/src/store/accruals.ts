@@ -200,7 +200,21 @@ export async function createAccrualStore(
   const url = redisUrl?.trim() ?? "";
   if (url === "") return undefined;
 
-  const store = new RedisAccrualStore(url, options);
+  let store: RedisAccrualStore;
+  try {
+    // `new Redis(url)` parses eagerly and THROWS on a malformed URL, even with lazyConnect.
+    // Constructing outside this try let that escape `createAccrualStore`, propagate through
+    // dependency construction and kill the process at boot — observed in production, where a
+    // mistyped REDIS_URL crash-looped the gateway instead of degrading. Payout durability is
+    // worth a loud warning; it is never worth refusing to start.
+    store = new RedisAccrualStore(url, options);
+  } catch (error) {
+    (options.logger ?? console).warn(
+      `accrual store: unusable REDIS_URL (${error instanceof Error ? error.message : String(error)}); accrued payouts will not be durable`,
+    );
+    return undefined;
+  }
+
   if (await store.connect()) return store;
 
   await store.close();
