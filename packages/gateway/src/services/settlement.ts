@@ -137,6 +137,19 @@ interface PayoutJob {
   amountAtomic: Atomic;
   records: SettlementRecord[];
   batchId: string | null;
+  /**
+   * Ask the chain whether this payout already landed BEFORE submitting it.
+   *
+   * Set only for a batch resumed from storage after a crash. Such a batch was already handed
+   * to `pay()` once by the process that died, so its transfer may well be on chain — and the
+   * Algorand lease that would otherwise reject the duplicate is only valid for a bounded
+   * window of rounds. A restart slower than that window turns a naive re-submit into a second
+   * real payment, which nothing on chain undoes.
+   *
+   * Never set for a fresh payout: that would spend an indexer round trip on every request to
+   * look for a transaction that cannot exist yet.
+   */
+  checkLandedFirst?: boolean;
 }
 
 /** Default ledger depth: large enough for a demo and an audit, small enough to be bounded. */
@@ -236,30 +249,49 @@ export class DoubleSettlementService implements SettlementServicePort {
   /**
    * Appends a durable write to an operator's chain, so stored state follows memory order.
    *
+   * The key is ALWAYS the operator address. It previously varied — flushes chained on the
+   * operator while batch releases chained on `batch:<id>` — which meant the two were
+   * unordered with respect to each other: `removeBatch` could complete before the `putBatch`
+   * it was meant to undo, leaving a settled batch's record written *after* its own deletion.
+   * That record then survives forever and the next boot pays it a second time. One key per
+   * operator is what makes "stored state follows memory order" actually true.
+   *
    * Failures are swallowed after logging: durability is best-effort relative to paying, and a
    * Redis outage must never stop an operator from being paid.
    */
-  private enqueueWrite(key: string, work: () => Promise<void>): Promise<void> {
-    const previous = this.writeChains.get(key) ?? Promise.resolve();
+  private enqueueWrite(operatorAddress: string, work: () => Promise<void>): Promise<void> {
+    const previous = this.writeChains.get(operatorAddress) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
       .then(work)
       .catch((error: unknown) => {
         this.logger.error(
-          { alert: "accrual_persist_failed", key, reason: describe(error) },
+          { alert: "accrual_persist_failed", operatorAddress, reason: describe(error) },
           "OPERATOR ALERT: could not persist accrual state; a crash would lose this liability",
         );
+      })
+      .finally(() => {
+        // Drop the entry once this is the tail, so a long-lived gateway does not accumulate
+        // one resolved promise per operator forever.
+        if (this.writeChains.get(operatorAddress) === next) {
+          this.writeChains.delete(operatorAddress);
+        }
       });
-    this.writeChains.set(key, next);
+    this.writeChains.set(operatorAddress, next);
     this.spawn(next);
     return next;
   }
 
-  /** Drops a stored batch record once its payout reached a terminal state. */
-  private releaseBatch(batchId: string | null): void {
+  /**
+   * Drops a stored batch record once its payout SETTLED.
+   *
+   * Only on success. A failed payout keeps its record: the operator has not been paid, so the
+   * liability is still real and must outlive the process that failed to discharge it.
+   */
+  private releaseBatch(batchId: string | null, operatorAddress: string): void {
     if (batchId === null || this.accrualStore === undefined) return;
     const store = this.accrualStore;
-    this.enqueueWrite(`batch:${batchId}`, () => store.removeBatch(batchId));
+    this.enqueueWrite(operatorAddress, () => store.removeBatch(batchId));
   }
 
   /**
@@ -301,14 +333,52 @@ export class DoubleSettlementService implements SettlementServicePort {
       "recovering accrued operator payouts left by a previous process",
     );
 
+    // Batches first, then open accruals — and de-duplicated by request id across BOTH.
+    //
+    // The two sets can genuinely overlap. Promoting an accrual writes the batch record and
+    // then deletes the open one; if the process dies between those, or the delete fails and
+    // its error is swallowed, the same requests exist in both. Iterating the concatenation
+    // without de-duplication pays them twice in a single boot — the money bug this whole
+    // recovery path exists to prevent.
+    //
+    // Batches take precedence because they are further along: one may already be on chain,
+    // and resuming it under its original id is what lets the chain check recognise that.
+    const handled = new Set<string>();
+
     for (const stored of [...loaded.batches, ...loaded.open]) {
       const records = stored.records as SettlementRecord[];
-      const payable = records.filter((r) => typeof r?.payoutAtomic === "string");
-      if (payable.length === 0) {
+      const usable = records.filter(
+        (r) => typeof r?.payoutAtomic === "string" && typeof r?.requestId === "string",
+      );
+      const dropped = records.length - usable.length;
+      if (dropped > 0) {
         this.logger.error(
-          { alert: "accrual_recovery_empty", operatorAddress: stored.operatorAddress },
-          "OPERATOR ALERT: recovered an accrual with no usable records; it cannot be paid automatically",
+          {
+            alert: "accrual_recovery_unusable_records",
+            operatorAddress: stored.operatorAddress,
+            batchId: stored.batchId ?? null,
+            dropped,
+          },
+          "OPERATOR ALERT: recovered accrual contained unusable records; that portion cannot be paid automatically",
         );
+      }
+
+      const payable = usable.filter((r) => !handled.has(r.requestId));
+      if (payable.length < usable.length) {
+        this.logger.warn(
+          {
+            operatorAddress: stored.operatorAddress,
+            batchId: stored.batchId ?? null,
+            skipped: usable.length - payable.length,
+          },
+          "recovered accrual overlapped one already being paid; the overlap was not paid twice",
+        );
+      }
+
+      if (payable.length === 0) {
+        // Nothing left to pay: either empty, or entirely covered by a batch handled above.
+        // Drop the stale row so the next boot does not reconsider it.
+        this.dropRecovered(stored);
         continue;
       }
 
@@ -316,33 +386,41 @@ export class DoubleSettlementService implements SettlementServicePort {
       // a late duplicate settlement callback cannot pay them a second time.
       for (const record of payable) {
         this.claimed.add(record.requestId);
+        handled.add(record.requestId);
         if (!this.ledger.has(record.requestId)) this.remember(record);
       }
 
       const summed = payable.reduce((acc, r) => acc + BigInt(r.payoutAtomic), 0n);
-      if (summed === 0n) continue;
+      if (summed === 0n) {
+        this.dropRecovered(stored);
+        continue;
+      }
 
-      const batchId =
-        stored.batchId ?? `${this.now().toString(36)}-r${(this.batchSeq += 1).toString(36)}`;
+      const resumed = typeof stored.batchId === "string" && stored.batchId.length > 0;
+      const batchId = resumed
+        ? (stored.batchId as string)
+        : `${this.now().toString(36)}-r${(this.batchSeq += 1).toString(36)}`;
+
       this.logger.warn(
         {
           batchId,
           operatorAddress: stored.operatorAddress,
           requests: payable.length,
           owedAtomic: summed.toString(10),
-          resumed: stored.batchId !== null && stored.batchId !== undefined,
+          resumed,
         },
         "paying out a recovered accrual",
       );
 
-      // Ensure it is stored as a batch under the id we are about to pay with, so a crash
-      // during recovery is itself recoverable.
+      // Store it as a batch under the id we are about to pay with, so a crash during recovery
+      // is itself recoverable. Chained on the OPERATOR, like every other durable write, so it
+      // cannot race the writes a live request is making for the same operator.
       if (this.accrualStore !== undefined) {
         const store = this.accrualStore;
-        const snapshot = { ...stored, batchId };
-        this.enqueueWrite(`batch:${batchId}`, async () => {
+        const snapshot = { ...stored, records: payable, batchId };
+        this.enqueueWrite(stored.operatorAddress, async () => {
           await store.putBatch(snapshot);
-          await store.removeOpen(stored.operatorAddress);
+          if (!resumed) await store.removeOpen(stored.operatorAddress);
         });
       }
 
@@ -353,9 +431,22 @@ export class DoubleSettlementService implements SettlementServicePort {
           amountAtomic: summed,
           records: payable,
           batchId,
+          // Only a resumed batch may already be on chain. Ask before paying.
+          ...(resumed ? { checkLandedFirst: true } : {}),
         }),
       );
     }
+  }
+
+  /** Removes a recovered row that has nothing left to pay. */
+  private dropRecovered(stored: PersistedAccrual): void {
+    if (this.accrualStore === undefined) return;
+    const store = this.accrualStore;
+    const batchId = typeof stored.batchId === "string" ? stored.batchId : null;
+    this.enqueueWrite(stored.operatorAddress, async () => {
+      if (batchId !== null) await store.removeBatch(batchId);
+      else await store.removeOpen(stored.operatorAddress);
+    });
   }
 
   /** Serializes an in-memory accrual for storage. */
@@ -370,8 +461,14 @@ export class DoubleSettlementService implements SettlementServicePort {
 
   /** @inheritdoc */
   async flushPayouts(): Promise<void> {
-    for (const operatorAddress of [...this.accruals.keys()]) {
-      this.flushAccrual(operatorAddress, "flush");
+    // Loop rather than snapshot-then-await. A settlement landing during the await would add a
+    // new accrual that a single pass never sees — and on the shutdown path that accrual is
+    // simply lost, which is the exact liability this method exists to protect.
+    while (this.accruals.size > 0) {
+      for (const operatorAddress of [...this.accruals.keys()]) {
+        this.flushAccrual(operatorAddress, "flush");
+      }
+      await this.whenIdle();
     }
     await this.whenIdle();
   }
@@ -636,6 +733,24 @@ export class DoubleSettlementService implements SettlementServicePort {
    */
   private async runPayout(job: PayoutJob): Promise<void> {
     const payout = job.amountAtomic;
+
+    if (job.checkLandedFirst === true) {
+      const already = await this.findLandedPayout(job);
+      if (already !== undefined) {
+        this.finalizeSettled(job.records, already.txId, job.batchId);
+        this.logger.warn(
+          {
+            payoutId: job.payoutId,
+            batchId: job.batchId,
+            payoutTxId: already.txId,
+            requests: job.records.length,
+          },
+          "recovered batch had already been paid on chain; recorded without paying again",
+        );
+        return;
+      }
+    }
+
     let lastError = "unknown error";
     for (let attempt = 1; attempt <= this.retry.attempts; attempt += 1) {
       try {
@@ -797,7 +912,7 @@ export class DoubleSettlementService implements SettlementServicePort {
     txId: string | null,
     batchId: string | null,
   ): void {
-    this.releaseBatch(batchId);
+    this.releaseBatch(batchId, records[0]?.operatorAddress ?? "");
     const settledAt = this.now();
     for (const record of records) {
       this.update(record.requestId, {
@@ -815,10 +930,11 @@ export class DoubleSettlementService implements SettlementServicePort {
     reason: string,
     batchId: string | null,
   ): void {
-    // Dropped on failure too. The ledger rows now say `failed` with the reason, which is the
-    // durable record a reconciliation run should act on; leaving the batch stored as well
-    // would make the next boot retry a payout that already gave up and was recorded.
-    this.releaseBatch(batchId);
+    // Deliberately NOT released. A payout that exhausted its retries has still not paid the
+    // operator, so the money is still owed. This used to delete the stored batch and defer to
+    // "the ledger" — but the ledger is in memory and capped at maxLedgerEntries, so deleting
+    // here erased the only durable trace of a real liability. Keeping it means the next boot
+    // retries, which is correct: the debt outlives the process that failed to settle it.
     const settledAt = this.now();
     for (const record of records) {
       this.update(record.requestId, {

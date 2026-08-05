@@ -137,7 +137,11 @@ describe("accruals are written down before they are owed for long", () => {
     expect(store.open.size).toBe(0);
   });
 
-  it("drops the batch record when the payout fails, so boot does not retry a recorded failure", async () => {
+  it("KEEPS the batch record when the payout fails, because the money is still owed", async () => {
+    // This test previously asserted the opposite, and the assertion was wrong. Deleting the
+    // record on failure "deferred to the ledger" — but the ledger is in memory and capped at
+    // maxLedgerEntries, so the delete erased the only durable trace of a real liability. An
+    // operator who was not paid stayed not paid, invisibly, forever.
     const store = new FakeAccrualStore();
     const payer = new StubPayer(99);
     const service = new DoubleSettlementService({
@@ -153,7 +157,7 @@ describe("accruals are written down before they are owed for long", () => {
     await service.flushPayouts();
 
     expect(service.getRecord("r1")?.status).toBe("failed");
-    expect(store.batches.size).toBe(0);
+    expect(store.batches.size, "a debt the gateway failed to pay must outlive the process").toBe(1);
   });
 });
 
@@ -374,5 +378,157 @@ describe("a bad REDIS_URL must never crash the gateway", () => {
         logger: { warn: () => undefined },
       }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("the recovery paths that could pay twice", () => {
+  /** A stored record shaped like the real thing. */
+  function rec(requestId: string) {
+    return {
+      requestId,
+      nodeId: "node-a",
+      payerAddress: OPERATOR,
+      operatorAddress: OPERATOR,
+      inboundAtomic: "2000",
+      payoutAtomic: "1700",
+      marginAtomic: "300",
+      inboundTxId: `IN-${requestId}`,
+      payoutTxId: null,
+      status: "accrued" as const,
+      createdAt: 1,
+      settledAt: null,
+    };
+  }
+
+  it("never pays a request twice when it exists as BOTH an open and a batch record", async () => {
+    // Reachable for real: promotion writes the batch record then deletes the open one, and
+    // the delete can fail with its error swallowed, or the process can die between them.
+    const store = new FakeAccrualStore();
+    store.batches.set("b1", {
+      operatorAddress: OPERATOR,
+      firstAt: 1,
+      batchId: "b1",
+      records: [rec("r1"), rec("r2")],
+    });
+    store.open.set(OPERATOR, {
+      operatorAddress: OPERATOR,
+      firstAt: 1,
+      records: [rec("r1"), rec("r2")], // the same requests, left behind
+    });
+
+    const { service, payer } = build(store);
+    await service.recoverAccruals();
+    await service.whenIdle();
+
+    // One payout, for two requests — not two payouts for the same two requests.
+    expect(payer.payments).toHaveLength(1);
+    expect(payer.payments[0]?.amountAtomic).toBe(PAYOUT_PER_REQUEST * 2n);
+  });
+
+  it("still pays the part of an open accrual a batch did not cover", async () => {
+    const store = new FakeAccrualStore();
+    store.batches.set("b1", {
+      operatorAddress: OPERATOR,
+      firstAt: 1,
+      batchId: "b1",
+      records: [rec("r1")],
+    });
+    store.open.set(OPERATOR, {
+      operatorAddress: OPERATOR,
+      firstAt: 1,
+      records: [rec("r1"), rec("r2")], // r2 is genuinely unpaid
+    });
+
+    const { service, payer } = build(store);
+    await service.recoverAccruals();
+    await service.whenIdle();
+
+    const total = payer.payments.reduce((a, p) => a + p.amountAtomic, 0n);
+    expect(total, "r1 once and r2 once").toBe(PAYOUT_PER_REQUEST * 2n);
+  });
+
+  it("asks the chain BEFORE re-submitting a resumed batch", async () => {
+    // The lease that would reject a duplicate is only valid for a bounded window of rounds. A
+    // restart slower than that window makes a naive re-submit a second real payment.
+    const store = new FakeAccrualStore();
+    store.batches.set("b1", {
+      operatorAddress: OPERATOR,
+      firstAt: 1,
+      batchId: "b1",
+      records: [rec("r1")],
+    });
+
+    const attempted: string[] = [];
+    const payer = {
+      senderAddress: OPERATOR,
+      pay: (r: PayoutRequest): Promise<{ txId: string }> => {
+        attempted.push(r.requestId);
+        return Promise.resolve({ txId: "SHOULD-NOT-HAPPEN" });
+      },
+      findLandedPayout: (payoutId: string): Promise<{ txId: string } | undefined> =>
+        Promise.resolve(payoutId === "batch/b1" ? { txId: "ALREADYLANDED" } : undefined),
+    };
+
+    const service = new DoubleSettlementService({
+      config: makeConfig({ payoutBatchMinUsdc: "1.00" }),
+      payer,
+      logger: silentLogger,
+      now: makeClock().now,
+      sleep: () => Promise.resolve(),
+      random: () => 0.5,
+      accrualStore: store,
+    });
+
+    await service.recoverAccruals();
+    await service.whenIdle();
+
+    expect(attempted, "pay() must not be reached when the batch already landed").toEqual([]);
+    expect(service.getRecord("r1")?.payoutTxId).toBe("ALREADYLANDED");
+    expect(store.batches.size).toBe(0);
+  });
+
+  it("does not spend a chain lookup on a fresh payout", async () => {
+    const store = new FakeAccrualStore();
+    let lookups = 0;
+    const payer = {
+      senderAddress: OPERATOR,
+      pay: (): Promise<{ txId: string }> => Promise.resolve({ txId: "TX" }),
+      findLandedPayout: (): Promise<{ txId: string } | undefined> => {
+        lookups += 1;
+        return Promise.resolve(undefined);
+      },
+    };
+    const service = new DoubleSettlementService({
+      config: makeConfig({ payoutBatchMinUsdc: "1.00" }),
+      payer,
+      logger: silentLogger,
+      now: makeClock().now,
+      sleep: () => Promise.resolve(),
+      random: () => 0.5,
+      accrualStore: store,
+    });
+
+    await settle(service, "r1");
+    await service.flushPayouts();
+
+    // A brand-new batch cannot already be on chain; probing for it would cost an indexer
+    // round trip on every single payout.
+    expect(lookups).toBe(0);
+  });
+
+  it("orders putBatch before removeBatch for the same operator", async () => {
+    // These used to run on different write chains, so removeBatch could complete before the
+    // putBatch it undoes — leaving a settled batch's record written after its own deletion,
+    // which the next boot would pay again.
+    const store = new FakeAccrualStore();
+    const { service } = build(store);
+    await settle(service, "r1");
+    await service.flushPayouts();
+
+    const put = store.calls.lastIndexOf("putBatch");
+    const rm = store.calls.lastIndexOf("removeBatch");
+    expect(put).toBeGreaterThanOrEqual(0);
+    expect(rm).toBeGreaterThan(put);
+    expect(store.batches.size).toBe(0);
   });
 });
