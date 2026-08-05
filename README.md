@@ -143,14 +143,28 @@ settles, re-derived from those records rather than trusted from a running total.
 in the batch is finalised together and shares a `batchId` — so a ledger row's `payoutAtomic` is
 that request's share, while the on-chain amount is the batch's sum.
 
-**The trade-off is real and worth stating plainly.** While a balance is accrued the gateway is
-holding USDC it already owes, and that liability lives in memory. Graceful shutdown flushes it
-(which is why `kill_timeout` in `fly.toml` must exceed `SHUTDOWN_GRACE_MS`), but a hard crash —
-OOM, SIGKILL, host loss — loses the record of who was owed what. The funds stay in the gateway
-wallet; nothing remembers to send them. `MESH_PAYOUT_BATCH_MAX_DELAY_MS` is what bounds that
-exposure, and `GET /v1/payouts/pending` is what makes it visible. Batching is **off by
-default** for exactly this reason: it changes when operators get paid, and that is not a
-decision a default should make for a deployment.
+While a balance is accrued the gateway is holding USDC it already owes. Graceful shutdown
+flushes it — which is why `kill_timeout` in `fly.toml` must exceed `SHUTDOWN_GRACE_MS` — and
+**setting `REDIS_URL` makes the liability durable across a hard crash**. Without Redis it lives
+only in the process, and an OOM kill or lost host takes the record with it: the funds stay in
+the gateway wallet and nothing remembers to send them. The gateway logs a warning at startup
+when batching is on and no store is configured, because that is a deliberate risk rather than a
+detail.
+
+Persistence introduces a sharper hazard than the one it fixes, and it is worth understanding.
+A process that dies _mid-payout_ leaves a stored record saying "pay this" when the transfer may
+already have landed; recovering that naively pays twice, and nothing on chain undoes it. So a
+batch's id is written down **before** the payout is attempted and reused verbatim on recovery.
+Same id means the same transaction note and the same Algorand lease as the attempt that may
+have committed — the lease makes the chain itself reject the duplicate, and `findLandedPayout`
+recognises the earlier transaction and records it settled instead of paying again.
+
+Recovery runs at boot before the listener opens. Accruals that were still accumulating are paid
+immediately rather than resumed, because the gateway cannot know how long it was down.
+
+Batching is still **off by default**: it changes when operators get paid, and that is not a
+decision a default should make for a deployment. `MESH_PAYOUT_BATCH_MAX_DELAY_MS` bounds how
+long any balance waits and `GET /v1/payouts/pending` makes it visible.
 
 Two properties are worth calling out because they are easy to get wrong:
 
@@ -465,7 +479,7 @@ Loaded by `loadGatewayConfig()` in `packages/shared/src/config.ts`.
 | `MESH_PAYOUT_BATCH_MIN_USDC`        |     |                      `0` |        | Accrue payouts until this is owed, then pay in one transaction. `0` = pay immediately.              |
 | `MESH_PAYOUT_BATCH_MAX_DELAY_MS`    |     |        `900000` (15 min) |        | Ceiling on how long an accrued payout waits. Also caps crash-loss exposure.                         |
 | `MESH_PUBLIC_BASE_URL`              |     | `http://localhost:$PORT` |        | Must be the URL clients actually reach; it is baked into challenges and the manifest.               |
-| `REDIS_URL`                         |     |        unset → in-memory |        | Node registry + settlement ledger backend.                                                          |
+| `REDIS_URL`                         |     |        unset → in-memory |        | Node registry backend. **Also makes accrued payout balances durable across a hard crash.**          |
 | `MESH_REQUIRE_USDC_OPT_IN`          |     |                   `true` |        | When true, a node whose operator has not opted in is stored but never routed to.                    |
 | `MESH_ALLOW_PRIVATE_NODE_ENDPOINTS` |     |                  `false` |        | Allow node endpoints on private/loopback/link-local addresses. **Local dev only** — see SSRF notes. |
 | `MESH_NODE_REQUEST_TIMEOUT_MS`      |     |                 `120000` |        | 1000–600000.                                                                                        |

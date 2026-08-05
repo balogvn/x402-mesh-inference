@@ -43,3 +43,6 @@ export type {
   RegistryLogger,
 } from "./redis.js";
 export type { NodeStore, RequestOutcome } from "./types.js";
+
+export { RedisAccrualStore, createAccrualStore } from "./accruals.js";
+export type { AccrualStore, PersistedAccrual } from "./accruals.js";

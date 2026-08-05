@@ -35,3 +35,6 @@ export type {
   ScoreWeights,
   SelectOptions,
 } from "./selector/index.js";
+
+export { RedisAccrualStore, createAccrualStore } from "./store/accruals.js";
+export type { AccrualStore, PersistedAccrual } from "./store/accruals.js";
