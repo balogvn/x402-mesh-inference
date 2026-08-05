@@ -9,3 +9,4 @@ coverage/
 *.log
 .vitest-reports/
 .wallets/
+.flake-hunt/

@@ -13,6 +13,8 @@ export function testAddress(seed: string): string {
 
 export interface NodeFixtureOverrides {
   nodeId?: string;
+  /** CAIP-2 network the registration was made on. Defaults to TestNet. */
+  network?: NodeRecord["registration"]["network"];
   capabilities?: NodeCapability[];
   healthy?: boolean;
   usdcOptedIn?: boolean;
@@ -46,7 +48,7 @@ export function makeNode(overrides: NodeFixtureOverrides = {}): NodeRecord {
       capabilities: overrides.capabilities ?? [
         { model: "llama3.1:8b", contextWindow: 8192, pricePer1kTokensUsdc: "0.0010" },
       ],
-      network: ALGORAND_TESTNET,
+      network: overrides.network ?? ALGORAND_TESTNET,
       version: "0.1.0",
       timestamp: 1_700_000_000_000,
       nonce: "0123456789abcdef0123456789abcdef",

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { NoCapacityError, type NodeRecord } from "@x402-mesh/shared";
+import {
+  ALGORAND_MAINNET,
+  ALGORAND_TESTNET,
+  NoCapacityError,
+  type NodeRecord,
+} from "@x402-mesh/shared";
 import { MemoryNodeStore, NodeSelector, type NodeSelectorOptions } from "../src/index.js";
 import { makeNode, pinnedRng, type NodeFixtureOverrides } from "./fixtures.js";
 
@@ -197,6 +202,7 @@ describe("NodeSelector no-capacity reporting", () => {
     const err = await expectNoCapacity(selector);
     expect(err.details?.registeredNodes).toBe(5);
     expect(err.details?.rejected).toEqual({
+      wrongNetwork: 0,
       unhealthy: 1,
       wrongModel: 1,
       notOptedIn: 1,
@@ -215,6 +221,7 @@ describe("NodeSelector no-capacity reporting", () => {
     expect(outcome).toBeInstanceOf(NoCapacityError);
     if (!(outcome instanceof NoCapacityError)) throw new Error("unreachable");
     expect(outcome.details?.rejected).toEqual({
+      wrongNetwork: 0,
       unhealthy: 0,
       wrongModel: 0,
       notOptedIn: 0,
@@ -419,5 +426,49 @@ describe("NodeSelector output", () => {
 
     expect((await priceOnly.select(MODEL)).node.registration.nodeId).toBe("node-a");
     expect((await latencyOnly.select(MODEL)).node.registration.nodeId).toBe("node-b");
+  });
+});
+
+describe("a registration outlives the network it was made on", () => {
+  /**
+   * Registrations are validated at registration time and then persisted, so flipping a
+   * gateway from TestNet to MainNet leaves the old ones in the store — healthy, advertising
+   * their models, and routable. Observed for real during the MainNet flip: a TestNet node
+   * stayed listed as healthy on a gateway that had moved to MainNet. Routing to one takes the
+   * client's money and then pays, or fails to pay, an operator on a chain we no longer settle.
+   */
+  it("refuses to route to a node registered on a different network", async () => {
+    const store = new MemoryNodeStore();
+    await store.upsert(makeNode({ nodeId: "stale-testnet", network: ALGORAND_TESTNET }));
+
+    const selector = new NodeSelector(store, { network: ALGORAND_MAINNET });
+    await expect(selector.select("llama3.1:8b")).rejects.toThrow(NoCapacityError);
+  });
+
+  it("reports it as wrongNetwork, not unhealthy", async () => {
+    // "unhealthy" would send an operator chasing a node that is working perfectly.
+    const store = new MemoryNodeStore();
+    await store.upsert(makeNode({ nodeId: "stale-testnet", network: ALGORAND_TESTNET }));
+    const selector = new NodeSelector(store, { network: ALGORAND_MAINNET });
+
+    await expect(selector.select("llama3.1:8b")).rejects.toMatchObject({
+      details: { rejected: { wrongNetwork: 1, unhealthy: 0 } },
+    });
+  });
+
+  it("routes normally to a node on the matching network", async () => {
+    const store = new MemoryNodeStore();
+    await store.upsert(makeNode({ nodeId: "mainnet-ok", network: ALGORAND_MAINNET }));
+
+    const selector = new NodeSelector(store, { network: ALGORAND_MAINNET });
+    const chosen = await selector.select("llama3.1:8b");
+    expect(chosen.node.registration.nodeId).toBe("mainnet-ok");
+  });
+
+  it("skips the check when no network is configured, preserving old behaviour", async () => {
+    const store = new MemoryNodeStore();
+    await store.upsert(makeNode({ nodeId: "whatever", network: ALGORAND_TESTNET }));
+
+    await expect(new NodeSelector(store).select("llama3.1:8b")).resolves.toBeDefined();
   });
 });

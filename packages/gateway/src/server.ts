@@ -58,7 +58,10 @@ async function buildDeps(
   // not availability.
   const nodeStore = await createNodeStore(config.redisUrl);
   const store = new RegistryStoreAdapter(nodeStore);
-  const selector = new RegistrySelectorAdapter(new NodeSelector(nodeStore), nodeStore);
+  const selector = new RegistrySelectorAdapter(
+    new NodeSelector(nodeStore, { network: config.network }),
+    nodeStore,
+  );
 
   const algorand = createAlgorandClient(config, readAlgodOverrides(env));
   const chain: ChainReaderPort = new AlgokitChainReader(algorand);

@@ -24,6 +24,7 @@ const DEFAULT_WEIGHT_FLOOR = 0.05;
 
 /** Why each rejected node was excluded. Surfaced in {@link NoCapacityError} details. */
 interface RejectionTally {
+  wrongNetwork: number;
   unhealthy: number;
   wrongModel: number;
   notOptedIn: number;
@@ -40,6 +41,21 @@ interface Candidate {
 }
 
 export interface NodeSelectorOptions {
+  /**
+   * CAIP-2 network the gateway settles on. Nodes registered on any other network are
+   * ineligible.
+   *
+   * Registrations outlive the network they were made on: they are validated at registration
+   * time and then persisted, so flipping a gateway from TestNet to MainNet leaves the old
+   * registrations in the store, still healthy, still advertising their models. Routing to one
+   * takes the client's money and then pays — or fails to pay — an operator address on a chain
+   * the gateway no longer settles on.
+   *
+   * Observed during the MainNet flip: a TestNet node stayed listed as healthy and routable on
+   * a gateway that had moved to MainNet. Omitted, this check is skipped and behaviour is
+   * unchanged, which keeps the selector usable in tests that do not care about networks.
+   */
+  network?: string;
   /** Overrides {@link DEFAULT_WEIGHTS}. */
   weights?: ScoreWeights;
   /**
@@ -69,9 +85,11 @@ export class NodeSelector {
   readonly #weights: ScoreWeights;
   readonly #rng: () => number;
   readonly #weightFloor: number;
+  readonly #network: string | undefined;
 
   constructor(store: NodeStore, options: NodeSelectorOptions = {}) {
     this.#store = store;
+    this.#network = options.network;
     this.#weights = options.weights ?? DEFAULT_WEIGHTS;
     this.#rng = options.rng ?? Math.random;
     const floor = options.weightFloor ?? DEFAULT_WEIGHT_FLOOR;
@@ -95,6 +113,7 @@ export class NodeSelector {
     const excluded = new Set(opts.excludeNodeIds ?? []);
     const records = await this.#store.list();
     const tally: RejectionTally = {
+      wrongNetwork: 0,
       unhealthy: 0,
       wrongModel: 0,
       notOptedIn: 0,
@@ -107,6 +126,12 @@ export class NodeSelector {
     for (const record of records) {
       if (excluded.has(record.registration.nodeId)) {
         tally.excluded += 1;
+        continue;
+      }
+      // Checked before health: a node on the wrong chain is not unhealthy, it is irrelevant,
+      // and reporting it as unhealthy would send an operator chasing a node that is fine.
+      if (this.#network !== undefined && record.registration.network !== this.#network) {
+        tally.wrongNetwork += 1;
         continue;
       }
       if (!record.health.healthy) {
