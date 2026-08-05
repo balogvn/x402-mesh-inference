@@ -125,6 +125,33 @@ per-model tier with no extra configuration.
 9. **Audit.** Every request lands in the ledger at `GET /v1/settlements`, with all three legs, the
    inbound and payout transaction ids, and a terminal `settled` / `failed` status.
 
+### Payout batching
+
+Every payout transaction costs a flat **0.001 ALGO** regardless of size — roughly `$0.0003` at
+ALGO `$0.30`. That is the _entire_ gateway margin on a `$0.0020` request and a third of it on a
+`$0.0060` one, charged again on every single request. Batching pays that fee once per batch
+instead of once per request.
+
+Set `MESH_PAYOUT_BATCH_MIN_USDC` to accrue what an operator is owed and settle it in one
+transfer when the balance crosses that threshold, or when
+`MESH_PAYOUT_BATCH_MAX_DELAY_MS` elapses — whichever comes first. Ten requests batched into one
+payout moves the fee from ~33% of margin to ~3%.
+
+Accruals are keyed by **operator address**, not by node, so one operator running several nodes
+is paid once. Each batch is one transaction whose amount is the exact sum of the requests it
+settles, re-derived from those records rather than trusted from a running total. Every request
+in the batch is finalised together and shares a `batchId` — so a ledger row's `payoutAtomic` is
+that request's share, while the on-chain amount is the batch's sum.
+
+**The trade-off is real and worth stating plainly.** While a balance is accrued the gateway is
+holding USDC it already owes, and that liability lives in memory. Graceful shutdown flushes it
+(which is why `kill_timeout` in `fly.toml` must exceed `SHUTDOWN_GRACE_MS`), but a hard crash —
+OOM, SIGKILL, host loss — loses the record of who was owed what. The funds stay in the gateway
+wallet; nothing remembers to send them. `MESH_PAYOUT_BATCH_MAX_DELAY_MS` is what bounds that
+exposure, and `GET /v1/payouts/pending` is what makes it visible. Batching is **off by
+default** for exactly this reason: it changes when operators get paid, and that is not a
+decision a default should make for a deployment.
+
 Two properties are worth calling out because they are easy to get wrong:
 
 - The payout is **idempotent**. A request id that has entered the payout path can never enter it
@@ -435,6 +462,8 @@ Loaded by `loadGatewayConfig()` in `packages/shared/src/config.ts`.
 | `MESH_INBOUND_PRICE_USDC`           |     |                 `0.0020` |        | Decimal string, ≤ 6 dp. `0.0020` = `2000` atomic. The price for any model not priced individually.  |
 | `MESH_MODEL_PRICES`                 |     |      none (flat pricing) |        | JSON `{"model":"0.0060"}`. Case-insensitive. Validated at boot. ≤ 16 **distinct prices**.           |
 | `MESH_MARGIN_BPS`                   |     |                   `1500` |        | 0–10000. 1500 bps on 2000 atomic = 300 margin, 1700 payout, no rounding.                            |
+| `MESH_PAYOUT_BATCH_MIN_USDC`        |     |                      `0` |        | Accrue payouts until this is owed, then pay in one transaction. `0` = pay immediately.              |
+| `MESH_PAYOUT_BATCH_MAX_DELAY_MS`    |     |        `900000` (15 min) |        | Ceiling on how long an accrued payout waits. Also caps crash-loss exposure.                         |
 | `MESH_PUBLIC_BASE_URL`              |     | `http://localhost:$PORT` |        | Must be the URL clients actually reach; it is baked into challenges and the manifest.               |
 | `REDIS_URL`                         |     |        unset → in-memory |        | Node registry + settlement ledger backend.                                                          |
 | `MESH_REQUIRE_USDC_OPT_IN`          |     |                   `true` |        | When true, a node whose operator has not opted in is stored but never routed to.                    |

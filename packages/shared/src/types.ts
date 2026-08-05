@@ -194,7 +194,21 @@ export interface SettlementRecord {
   inboundTxId: string;
   /** Confirmed payout (gateway -> operator) transaction id; null until settled. */
   payoutTxId: string | null;
-  status: "pending" | "settled" | "failed";
+  /**
+   * Payout batch this request was paid in, when batching is enabled.
+   *
+   * Several requests to the same operator are paid by one transaction, so `payoutTxId` is
+   * shared across every record carrying the same `batchId` and the amount on chain is the
+   * *sum* of their `payoutAtomic`, not this row's. Null when the payout was unbatched.
+   */
+  batchId?: string | null;
+  /**
+   * `accrued` means the client's payment settled and the operator is owed this amount, but
+   * the payout transaction has not been submitted yet — it is waiting for its batch to reach
+   * the size or age threshold. It is a real liability, not a pending network call, which is
+   * why it is distinct from `pending`.
+   */
+  status: "pending" | "accrued" | "settled" | "failed";
   /** Operator-actionable failure reason when `status === "failed"`. */
   error?: string;
   createdAt: number;

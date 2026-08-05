@@ -74,6 +74,31 @@ export function createHealthRouter(deps: HealthRouteDeps): Router {
     });
   });
 
+  // Free and unauthenticated for the same reason the settlement ledger is: an operator must
+  // be able to see what the gateway owes them without asking anyone. With batching enabled
+  // this is the difference between "not paid yet" and "not going to be paid", and only the
+  // gateway knows which.
+  router.get("/v1/payouts/pending", (_req, res) => {
+    const pending = deps.settlement.getPendingPayouts();
+    const owed = pending.reduce((sum, p) => sum + BigInt(p.owedAtomic), 0n);
+    res.status(200).json({
+      batching:
+        deps.config.payoutBatchMinUsdc === "0"
+          ? { enabled: false }
+          : {
+              enabled: true,
+              minUsdc: deps.config.payoutBatchMinUsdc,
+              maxDelayMs: deps.config.payoutBatchMaxDelayMs,
+            },
+      asset: usdcAssetId(deps.config.network),
+      decimals: 6,
+      operators: pending.length,
+      totalOwedAtomic: owed.toString(10),
+      totalOwedUsdc: atomicToUsdc(owed),
+      pending,
+    });
+  });
+
   return router;
 }
 

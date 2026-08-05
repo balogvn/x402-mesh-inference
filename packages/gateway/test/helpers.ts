@@ -28,6 +28,7 @@ import type {
   NodeSelectorPort,
   NodeStorePort,
   PayoutRequest,
+  PendingPayout,
   RouteInput,
   RouteResult,
   RouterPort,
@@ -78,6 +79,10 @@ export function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfi
     inboundPriceUsdc: "0.0020",
     modelPricesUsdc: {},
     marginBps: 1500,
+    // Batching off by default in tests, matching the production default, so every existing
+    // expectation about "one payout per request" keeps meaning what it says.
+    payoutBatchMinUsdc: "0",
+    payoutBatchMaxDelayMs: 900_000,
     publicBaseUrl: "https://mesh.test",
     requireUsdcOptIn: true,
     // Test nodes live on loopback, so the SSRF guard is relaxed by default here. The tests
@@ -252,6 +257,18 @@ export class StubSettlement implements SettlementServicePort {
 
   whenIdle(): Promise<void> {
     return Promise.resolve();
+  }
+
+  /** Records that a flush was requested, so a test can assert shutdown asked for one. */
+  flushes = 0;
+  flushPayouts(): Promise<void> {
+    this.flushes += 1;
+    return Promise.resolve();
+  }
+
+  pending: PendingPayout[] = [];
+  getPendingPayouts(): PendingPayout[] {
+    return this.pending;
   }
 }
 

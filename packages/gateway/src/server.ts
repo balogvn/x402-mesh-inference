@@ -29,8 +29,16 @@ import { buildResourceServer } from "./x402/server.js";
  * the application be exercised without any of them.
  */
 
-/** Grace period for in-flight requests during shutdown. */
-const SHUTDOWN_GRACE_MS = 10_000;
+/**
+ * Grace period for in-flight requests and the accrued-payout flush during shutdown.
+ *
+ * Must comfortably exceed the payout retry span (~21s, see DEFAULT_RETRY_POLICY), because
+ * shutdown now pays out accrued balances and cutting that off mid-retry-chain is how a
+ * routine deploy turns into an operator not being paid. `kill_timeout` in fly.toml must be
+ * at least this long or the platform SIGKILLs before the flush finishes — Fly's default is
+ * 5 seconds, which is far too short.
+ */
+const SHUTDOWN_GRACE_MS = 30_000;
 
 /**
  * Builds production dependencies from configuration and the environment.
@@ -122,7 +130,10 @@ async function main(): Promise<void> {
   const logger = createLogger(config.logLevel);
   const telemetry = await initTelemetry(config, logger);
 
-  const app = createApp(await buildDeps(config, logger, process.env));
+  // Kept in scope rather than inlined: the shutdown handler needs the settlement service to
+  // flush accrued payouts before the process exits.
+  const deps = await buildDeps(config, logger, process.env);
+  const app = createApp(deps);
 
   const server: Server = app.listen(config.port, config.host, () => {
     logger.info(
@@ -152,10 +163,24 @@ async function main(): Promise<void> {
     force.unref();
 
     server.close(() => {
-      void telemetry.shutdown().finally(() => {
-        clearTimeout(force);
-        process.exit(0);
-      });
+      // Pay out everything accrued BEFORE exiting. With batching enabled the gateway is
+      // holding USDC it already owes operators, and the record of who is owed what lives in
+      // memory — so exiting without this turns every routine deploy into an operator not
+      // being paid. Bounded by the same grace timer as the rest of shutdown.
+      void deps.settlement
+        .flushPayouts()
+        .catch((error: unknown) => {
+          logger.error(
+            { alert: "shutdown_flush_failed", reason: String(error) },
+            "OPERATOR ALERT: accrued payouts could not be flushed before shutdown",
+          );
+        })
+        .finally(() => {
+          void telemetry.shutdown().finally(() => {
+            clearTimeout(force);
+            process.exit(0);
+          });
+        });
     });
   };
 

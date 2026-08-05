@@ -4,12 +4,14 @@ import {
   atomicToWire,
   computeSplit,
   usdcAssetId,
+  usdcToAtomic,
   SettlementError,
 } from "@x402-mesh/shared";
 import type { Logger } from "../logger.js";
 import type {
   Clock,
   InboundSettlement,
+  PendingPayout,
   SettlementServicePort,
   Sleep,
   UsdcPayoutPort,
@@ -96,6 +98,38 @@ interface RoutingNote {
   at: number;
 }
 
+/** One operator's accrued-but-unpaid balance. */
+interface Accrual {
+  operatorAddress: string;
+  /** Ledger entries this accrual will settle, in arrival order. */
+  records: SettlementRecord[];
+  /** Sum of `records[].payoutAtomic`. Maintained incrementally and re-derived before paying. */
+  totalAtomic: Atomic;
+  /** When the first request in this accrual settled; drives the age deadline. */
+  firstAt: number;
+  /** Fires the age-based flush. Cleared whenever the accrual is drained. */
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * One payout transaction, whether it settles one request or many.
+ *
+ * Batched and unbatched payouts run the same code, which is the point: the retry policy, the
+ * already-landed chain check and the ledger finalisation are the parts most likely to hide a
+ * money bug, and having one copy means a batch cannot quietly get a weaker version of them.
+ *
+ * `payoutId` is what goes into the transaction note and lease. For an unbatched payout it is
+ * the request id — byte-identical to what shipped before batching existed, so historical
+ * reconciliation by note prefix keeps working.
+ */
+interface PayoutJob {
+  payoutId: string;
+  receiver: string;
+  amountAtomic: Atomic;
+  records: SettlementRecord[];
+  batchId: string | null;
+}
+
 /** Default ledger depth: large enough for a demo and an audit, small enough to be bounded. */
 const DEFAULT_MAX_LEDGER_ENTRIES = 1_000;
 
@@ -138,6 +172,15 @@ export class DoubleSettlementService implements SettlementServicePort {
   /** In-flight payout promises, awaited by {@link whenIdle}. */
   private readonly inFlight = new Set<Promise<void>>();
 
+  /** Minimum owed before a batch is paid. Zero disables batching. */
+  private readonly batchMinAtomic: Atomic;
+
+  /** Accrued-but-unpaid balances, keyed by operator address. */
+  private readonly accruals = new Map<string, Accrual>();
+
+  /** Monotonic suffix making each batch id unique within a process. */
+  private batchSeq = 0;
+
   constructor(deps: SettlementDeps) {
     this.config = deps.config;
     this.payer = deps.payer;
@@ -150,6 +193,28 @@ export class DoubleSettlementService implements SettlementServicePort {
     // Resolved once at construction: a mismatch between the configured network and the ASA
     // would silently pay operators in the wrong asset.
     this.assetId = usdcAssetId(this.config.network);
+    this.batchMinAtomic = usdcToAtomic(this.config.payoutBatchMinUsdc);
+  }
+
+  /** @inheritdoc */
+  async flushPayouts(): Promise<void> {
+    for (const operatorAddress of [...this.accruals.keys()]) {
+      this.flushAccrual(operatorAddress, "flush");
+    }
+    await this.whenIdle();
+  }
+
+  /** @inheritdoc */
+  getPendingPayouts(): PendingPayout[] {
+    return [...this.accruals.values()]
+      .map((a) => ({
+        operatorAddress: a.operatorAddress,
+        owedAtomic: a.totalAtomic.toString(10),
+        requests: a.records.length,
+        oldestAt: a.firstAt,
+        deadlineAt: a.firstAt + this.config.payoutBatchMaxDelayMs,
+      }))
+      .sort((x, y) => x.oldestAt - y.oldestAt);
   }
 
   /** @inheritdoc */
@@ -195,8 +260,127 @@ export class DoubleSettlementService implements SettlementServicePort {
     }
     this.remember(record);
 
+    const payout = BigInt(record.payoutAtomic);
+
+    // Nothing owed (a 100% margin configuration) never becomes a transaction, batched or not:
+    // recording it settled with no txId is more honest than submitting a zero-value transfer.
+    if (payout === 0n) {
+      this.finalizeSettled([record], null, null);
+      return;
+    }
+
+    if (this.batchMinAtomic > 0n) {
+      this.accrue(record, payout);
+      return;
+    }
+
     // Detach the payout so the (already-buffered) client response is flushed first.
-    const task = this.runPayout(record).finally(() => {
+    this.spawn(
+      this.runPayout({
+        payoutId: record.requestId,
+        receiver: record.operatorAddress,
+        amountAtomic: payout,
+        records: [record],
+        batchId: null,
+      }),
+    );
+  }
+
+  /**
+   * Adds one settled request to its operator's accrual, flushing when the threshold is hit.
+   *
+   * The record is marked `accrued` rather than left `pending`: the client's money has landed
+   * and the operator is owed, which is a liability, not an in-flight network call. An operator
+   * reading the ledger must be able to tell those apart.
+   */
+  private accrue(record: SettlementRecord, payout: Atomic): void {
+    const at = this.now();
+    this.update(record.requestId, { ...record, status: "accrued" });
+
+    let accrual = this.accruals.get(record.operatorAddress);
+    if (accrual === undefined) {
+      accrual = {
+        operatorAddress: record.operatorAddress,
+        records: [],
+        totalAtomic: 0n,
+        firstAt: at,
+      };
+      this.accruals.set(record.operatorAddress, accrual);
+    }
+    accrual.records.push(record);
+    accrual.totalAtomic += payout;
+
+    if (accrual.totalAtomic >= this.batchMinAtomic) {
+      this.flushAccrual(record.operatorAddress, "threshold");
+      return;
+    }
+
+    // Age deadline, armed once per accrual so the wait is measured from the FIRST request in
+    // it. Re-arming on every request would let a steadily-trickling operator never get paid.
+    if (accrual.timer === undefined) {
+      const timer = setTimeout(() => {
+        this.flushAccrual(record.operatorAddress, "deadline");
+      }, this.config.payoutBatchMaxDelayMs);
+      // Unref'd so an accrual waiting on its deadline cannot keep the process alive; graceful
+      // shutdown flushes explicitly rather than relying on this timer firing.
+      timer.unref?.();
+      accrual.timer = timer;
+    }
+  }
+
+  /** Detaches one accrual into a payout job. Safe to call when nothing is accrued. */
+  private flushAccrual(operatorAddress: string, reason: string): void {
+    const accrual = this.accruals.get(operatorAddress);
+    if (accrual === undefined || accrual.records.length === 0) return;
+
+    this.accruals.delete(operatorAddress);
+    if (accrual.timer !== undefined) clearTimeout(accrual.timer);
+
+    // Re-derived from the records rather than trusted from the running total. These two
+    // disagreeing would mean paying an amount no set of requests adds up to, so it is checked
+    // rather than assumed — the same reason `computeSplit` is re-asserted before funds move.
+    const summed = accrual.records.reduce((acc, r) => acc + BigInt(r.payoutAtomic), 0n);
+    if (summed !== accrual.totalAtomic) {
+      this.logger.error(
+        {
+          alert: "batch_sum_mismatch",
+          operatorAddress,
+          running: accrual.totalAtomic.toString(10),
+          summed: summed.toString(10),
+          requests: accrual.records.length,
+        },
+        "OPERATOR ALERT: accrual total disagrees with its records; paying the summed amount",
+      );
+    }
+
+    this.batchSeq += 1;
+    const batchId = `${this.now().toString(36)}-${this.batchSeq.toString(36)}`;
+
+    this.logger.info(
+      {
+        batchId,
+        operatorAddress,
+        requests: accrual.records.length,
+        owedAtomic: summed.toString(10),
+        reason,
+      },
+      "flushing operator payout batch",
+    );
+
+    this.spawn(
+      this.runPayout({
+        payoutId: `batch/${batchId}`,
+        receiver: operatorAddress,
+        amountAtomic: summed,
+        records: accrual.records,
+        batchId,
+      }),
+    );
+  }
+
+  /** Tracks a detached payout so {@link whenIdle} and {@link flushPayouts} can await it. */
+  private spawn(work: Promise<void>): void {
+    const task = work.finally(() => {
       this.inFlight.delete(task);
     });
     this.inFlight.add(task);
@@ -250,16 +434,8 @@ export class DoubleSettlementService implements SettlementServicePort {
    * Never throws: the terminal state is either `settled` with a payout transaction id, or
    * `failed` with an operator-actionable reason and an alert-level log line.
    */
-  private async runPayout(record: SettlementRecord): Promise<void> {
-    const payout = BigInt(record.payoutAtomic);
-
-    if (payout === 0n) {
-      // A 100% margin configuration is legal but means nothing is owed; recording it as
-      // settled with no transaction is more honest than submitting a zero-value transfer.
-      this.finalizeSettled(record, null);
-      return;
-    }
-
+  private async runPayout(job: PayoutJob): Promise<void> {
+    const payout = job.amountAtomic;
     let lastError = "unknown error";
     for (let attempt = 1; attempt <= this.retry.attempts; attempt += 1) {
       try {
@@ -267,25 +443,27 @@ export class DoubleSettlementService implements SettlementServicePort {
           "gateway.payout",
           () =>
             this.payer.pay({
-              receiver: record.operatorAddress,
+              receiver: job.receiver,
               amountAtomic: payout,
               assetId: this.assetId,
-              requestId: record.requestId,
+              requestId: job.payoutId,
             }),
           {
-            "mesh.request_id": record.requestId,
-            "mesh.node_id": record.nodeId,
-            "mesh.payout_atomic": record.payoutAtomic,
+            "mesh.payout_id": job.payoutId,
+            "mesh.batch_id": job.batchId ?? "",
+            "mesh.batch_size": job.records.length,
+            "mesh.payout_atomic": payout.toString(10),
             "mesh.attempt": attempt,
           },
         );
-        this.finalizeSettled(record, txId);
+        this.finalizeSettled(job.records, txId, job.batchId);
         this.logger.info(
           {
-            requestId: record.requestId,
-            nodeId: record.nodeId,
-            payoutAtomic: record.payoutAtomic,
-            marginAtomic: record.marginAtomic,
+            payoutId: job.payoutId,
+            batchId: job.batchId,
+            operatorAddress: job.receiver,
+            requests: job.records.length,
+            payoutAtomic: payout.toString(10),
             payoutTxId: txId,
             attempt,
           },
@@ -303,13 +481,13 @@ export class DoubleSettlementService implements SettlementServicePort {
         // BRW5GM5FQJJHLICDTTXNJH3BNRBRVP7RCS6C4FMGYTCTRPOCFO4Q landed while its ledger row
         // said failed. (The Algorand lease on the payout already prevents an actual double
         // spend; this is about the ledger telling the truth.)
-        const landed = await this.findLandedPayout(record);
+        const landed = await this.findLandedPayout(job);
         if (landed !== undefined) {
-          this.finalizeSettled(record, landed.txId);
+          this.finalizeSettled(job.records, landed.txId, job.batchId);
           this.logger.info(
             {
-              requestId: record.requestId,
-              nodeId: record.nodeId,
+              payoutId: job.payoutId,
+              batchId: job.batchId,
               payoutTxId: landed.txId,
               attempt,
               reason: lastError,
@@ -321,8 +499,8 @@ export class DoubleSettlementService implements SettlementServicePort {
 
         this.logger.warn(
           {
-            requestId: record.requestId,
-            nodeId: record.nodeId,
+            payoutId: job.payoutId,
+            batchId: job.batchId,
             attempt,
             attempts: this.retry.attempts,
             reason: lastError,
@@ -335,29 +513,43 @@ export class DoubleSettlementService implements SettlementServicePort {
 
     // Last look before declaring failure: a payout submitted on the final attempt may have
     // committed after that attempt's confirmation wait gave up.
-    const lateLanded = await this.findLandedPayout(record);
+    const lateLanded = await this.findLandedPayout(job);
     if (lateLanded !== undefined) {
-      this.finalizeSettled(record, lateLanded.txId);
+      this.finalizeSettled(job.records, lateLanded.txId, job.batchId);
       this.logger.info(
-        { requestId: record.requestId, nodeId: record.nodeId, payoutTxId: lateLanded.txId },
+        { payoutId: job.payoutId, batchId: job.batchId, payoutTxId: lateLanded.txId },
         "operator payout landed after the final attempt; recorded as settled",
       );
       return;
     }
 
-    this.finalizeFailed(record, lastError);
+    this.finalizeFailed(job.records, lastError, job.batchId);
     // Operator alert: money was taken from the client and the node operator has not been
     // paid. This needs a human or an automated reconciliation run, so it is error level with
     // every field required to replay the payout by hand.
     this.logger.error(
       {
         alert: "payout_failed",
-        requestId: record.requestId,
-        nodeId: record.nodeId,
-        operatorAddress: record.operatorAddress,
-        payoutAtomic: record.payoutAtomic,
+        payoutId: job.payoutId,
+        batchId: job.batchId,
+        operatorAddress: job.receiver,
+        payoutAtomic: payout.toString(10),
         assetId: this.assetId,
-        inboundTxId: record.inboundTxId,
+        requests: job.records.length,
+        // Singular fields preserved verbatim for an unbatched payout, so alerting built
+        // against the pre-batching shape keeps working. A batch cannot honestly report one
+        // request id or one inbound transaction, so it reports the lists instead — which is
+        // what a human replaying the payout actually needs.
+        ...(job.records.length === 1 && job.records[0] !== undefined
+          ? {
+              requestId: job.records[0].requestId,
+              nodeId: job.records[0].nodeId,
+              inboundTxId: job.records[0].inboundTxId,
+            }
+          : {
+              requestIds: job.records.map((r) => r.requestId),
+              inboundTxIds: job.records.map((r) => r.inboundTxId),
+            }),
         attempts: this.retry.attempts,
         reason: lastError,
       },
@@ -376,10 +568,10 @@ export class DoubleSettlementService implements SettlementServicePort {
    * @param record - The settlement record whose payout to look for.
    * @returns The committed transaction id, or undefined.
    */
-  private async findLandedPayout(record: SettlementRecord): Promise<{ txId: string } | undefined> {
+  private async findLandedPayout(job: PayoutJob): Promise<{ txId: string } | undefined> {
     if (this.payer.findLandedPayout === undefined) return undefined;
     try {
-      return await this.payer.findLandedPayout(record.requestId, record.operatorAddress);
+      return await this.payer.findLandedPayout(job.payoutId, job.receiver);
     } catch {
       return undefined;
     }
@@ -392,22 +584,46 @@ export class DoubleSettlementService implements SettlementServicePort {
     return Math.round(clamped + jitter);
   }
 
-  private finalizeSettled(record: SettlementRecord, txId: string | null): void {
-    this.update(record.requestId, {
-      ...record,
-      payoutTxId: txId,
-      status: "settled",
-      settledAt: this.now(),
-    });
+  /**
+   * Marks every request the payout covered as settled.
+   *
+   * All of them share one `payoutTxId`, and the on-chain amount is the SUM of their
+   * `payoutAtomic` — which is why `batchId` is written alongside. Without it a reader
+   * comparing one row's `payoutAtomic` against the transaction would conclude the gateway
+   * overpaid.
+   */
+  private finalizeSettled(
+    records: readonly SettlementRecord[],
+    txId: string | null,
+    batchId: string | null,
+  ): void {
+    const settledAt = this.now();
+    for (const record of records) {
+      this.update(record.requestId, {
+        ...record,
+        payoutTxId: txId,
+        batchId,
+        status: "settled",
+        settledAt,
+      });
+    }
   }
 
-  private finalizeFailed(record: SettlementRecord, reason: string): void {
-    this.update(record.requestId, {
-      ...record,
-      status: "failed",
-      error: reason.slice(0, 1024),
-      settledAt: this.now(),
-    });
+  private finalizeFailed(
+    records: readonly SettlementRecord[],
+    reason: string,
+    batchId: string | null,
+  ): void {
+    const settledAt = this.now();
+    for (const record of records) {
+      this.update(record.requestId, {
+        ...record,
+        batchId,
+        status: "failed",
+        error: reason.slice(0, 1024),
+        settledAt,
+      });
+    }
   }
 
   /**

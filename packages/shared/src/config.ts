@@ -186,6 +186,26 @@ export interface GatewayConfig {
   modelPricesUsdc: ModelPrices;
   /** Gateway margin in basis points. */
   marginBps: number;
+  /**
+   * Accrue operator payouts until this much USDC is owed, then pay it in one transaction.
+   *
+   * Every payout transaction costs a flat 0.001 ALGO regardless of size. On a $0.0060 request
+   * the gateway's 15% margin is $0.0009, and that fee is ~$0.0003 at ALGO $0.30 — a third of
+   * the margin, on every single request. Batching pays it once per batch instead.
+   *
+   * `"0"` (the default) disables batching entirely: every request is paid immediately, which
+   * is exactly the behaviour that existed before this option. Enabling it means the gateway
+   * holds funds it owes, so read {@link payoutBatchMaxDelayMs} and the README's durability
+   * note before turning it on.
+   */
+  payoutBatchMinUsdc: string;
+  /**
+   * Hard ceiling on how long an accrued payout may wait, however small the balance.
+   *
+   * This is the bound on both how long an operator waits to be paid and how much unpaid
+   * liability a crash can lose, so it is a risk dial, not a tuning knob.
+   */
+  payoutBatchMaxDelayMs: number;
   /** Externally reachable base URL, used in x402 resource declarations. */
   publicBaseUrl: string;
   /** Optional Redis connection string; the registry falls back to memory when absent. */
@@ -228,6 +248,10 @@ const GatewayEnvSchema = z.object({
   MESH_INBOUND_PRICE_USDC: usdcField(DEFAULT_INBOUND_USDC),
   MESH_MODEL_PRICES: optionalStringField(4_096),
   MESH_MARGIN_BPS: intField(DEFAULT_MARGIN_BPS, 0, 10_000),
+  MESH_PAYOUT_BATCH_MIN_USDC: usdcField("0"),
+  // Floor of 1s so a misconfiguration cannot spin the flush timer; ceiling of 24h so an
+  // operator's money can never be held indefinitely by a typo.
+  MESH_PAYOUT_BATCH_MAX_DELAY_MS: intField(900_000, 1_000, 86_400_000),
   MESH_PUBLIC_BASE_URL: optionalUrlField(),
   REDIS_URL: optionalStringField(),
   MESH_REQUIRE_USDC_OPT_IN: boolField(true),
@@ -265,6 +289,8 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
     inboundPriceUsdc: parsed.MESH_INBOUND_PRICE_USDC,
     modelPricesUsdc: parseModelPrices(parsed.MESH_MODEL_PRICES),
     marginBps: parsed.MESH_MARGIN_BPS,
+    payoutBatchMinUsdc: parsed.MESH_PAYOUT_BATCH_MIN_USDC,
+    payoutBatchMaxDelayMs: parsed.MESH_PAYOUT_BATCH_MAX_DELAY_MS,
     publicBaseUrl: stripTrailingSlash(parsed.MESH_PUBLIC_BASE_URL ?? `http://localhost:${port}`),
     requireUsdcOptIn: parsed.MESH_REQUIRE_USDC_OPT_IN,
     allowPrivateNodeEndpoints: parsed.MESH_ALLOW_PRIVATE_NODE_ENDPOINTS,

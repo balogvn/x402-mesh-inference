@@ -124,6 +124,19 @@ export interface InboundSettlement {
   inboundAtomic: Atomic;
 }
 
+/** One operator's unpaid balance, as reported by `GET /v1/payouts/pending`. */
+export interface PendingPayout {
+  operatorAddress: string;
+  /** Sum owed, in atomic USDC units, as a decimal string. */
+  owedAtomic: string;
+  /** How many settled requests make up that sum. */
+  requests: number;
+  /** When the oldest request in this accrual settled. */
+  oldestAt: number;
+  /** When this accrual will be paid out even if it never reaches the threshold. */
+  deadlineAt: number;
+}
+
 /** Orchestrates the second settlement leg and owns the audit ledger. */
 export interface SettlementServicePort {
   /**
@@ -142,6 +155,20 @@ export interface SettlementServicePort {
   getSettlementLedger(): SettlementRecord[];
   /** Resolves when no payout is in flight. Test-only affordance; cheap in production. */
   whenIdle(): Promise<void>;
+  /**
+   * Pays out every accrued balance immediately, regardless of threshold or age.
+   *
+   * Called on graceful shutdown. With batching enabled the gateway holds funds it already
+   * owes operators, and that liability lives in memory — so a deploy that exits without
+   * flushing loses the record of who is owed what. This is the difference between a restart
+   * being routine and a restart costing operators money.
+   *
+   * Resolves once every flush has reached a terminal state. Never throws: a failed flush is
+   * recorded and logged like any other failed payout.
+   */
+  flushPayouts(): Promise<void>;
+  /** What is currently owed but unpaid, by operator. Served by `GET /v1/payouts/pending`. */
+  getPendingPayouts(): PendingPayout[];
 }
 
 /** Where a streamed upstream response is written. */

@@ -12,6 +12,11 @@
 app = "x402-mesh-gateway"
 primary_region = "iad"
 
+# Long enough for the shutdown handler to pay out every accrued operator balance before the
+# platform SIGKILLs. Payout retries span ~21s and SHUTDOWN_GRACE_MS is 30s, so anything less
+# than that turns a deploy into unpaid operators. Fly's default is 5s.
+kill_timeout = "35s"
+
 [build]
   dockerfile = "docker/Dockerfile.gateway"
 
@@ -46,6 +51,17 @@ primary_region = "iad"
   # one fee each — and it is not implemented yet. This price makes the current design
   # solvent in the meantime; it does not make the fee go away.
   MESH_MODEL_PRICES = '{"llama-3.3-70b-versatile":"0.0060"}'
+
+  # Batch operator payouts. Each payout transaction costs a flat 0.001 ALGO (~$0.0003 at ALGO
+  # $0.30) whatever its size, so paying per request spent a third of the $0.0009 margin on
+  # fees. Accruing to $0.05 makes that fee ~0.6% of the transfer instead.
+  #
+  # The 2-minute ceiling is deliberately far below the 15-minute default: this deployment gets
+  # sparse, bursty traffic, and a lone request that sat unpaid for a quarter of an hour would
+  # read as broken to anyone watching /v1/settlements. It also caps how much accrued liability
+  # a hard crash could lose, since accruals live in memory. Graceful shutdown flushes them.
+  MESH_PAYOUT_BATCH_MIN_USDC = "0.05"
+  MESH_PAYOUT_BATCH_MAX_DELAY_MS = "120000"
 
   # A publicly reachable gateway must not accept node endpoints on private address space —
   # that is the SSRF guard. Leave this false here; it is only relaxed for local development.

@@ -468,6 +468,73 @@ paths:
               schema:
                 $ref: "#/components/schemas/DiscoveryManifest"
 
+  /v1/payouts/pending:
+    get:
+      operationId: getPendingPayouts
+      tags: [settlements]
+      summary: Operator balances the gateway owes but has not yet paid.
+      description: |
+        Non-empty only when payout batching is enabled (`MESH_PAYOUT_BATCH_MIN_USDC` > 0).
+
+        Batching accrues what an operator has earned and settles it in one transaction when
+        the balance crosses the threshold or `MESH_PAYOUT_BATCH_MAX_DELAY_MS` elapses, so a
+        flat 0.001 ALGO transaction fee is paid once per batch rather than once per request.
+
+        Free and unauthenticated, for the same reason the settlement ledger is: an operator
+        must be able to see what they are owed without asking anyone. Accrued balances are
+        held in the gateway wallet and tracked in memory — `deadlineAt` bounds how long any
+        balance can sit here.
+      responses:
+        "200":
+          description: Currently accrued balances, oldest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [batching, asset, decimals, operators, totalOwedAtomic, pending]
+                properties:
+                  batching:
+                    type: object
+                    required: [enabled]
+                    properties:
+                      enabled: { type: boolean }
+                      minUsdc:
+                        type: string
+                        description: Balance that triggers a payout. Absent when disabled.
+                      maxDelayMs:
+                        type: integer
+                        description: Ceiling on how long a balance waits. Absent when disabled.
+                  asset: { type: string, example: "10458941" }
+                  decimals: { type: integer, example: 6 }
+                  operators:
+                    type: integer
+                    description: How many operators currently have an unpaid balance.
+                  totalOwedAtomic:
+                    type: string
+                    description: Sum of every unpaid balance, in atomic USDC units.
+                  totalOwedUsdc: { type: string, example: "0.010200" }
+                  pending:
+                    type: array
+                    items:
+                      type: object
+                      required: [operatorAddress, owedAtomic, requests, oldestAt, deadlineAt]
+                      properties:
+                        operatorAddress: { type: string }
+                        owedAtomic:
+                          type: string
+                          description: |
+                            Sum owed this operator. The eventual transaction moves exactly
+                            this amount and settles every request that makes it up.
+                        requests:
+                          type: integer
+                          description: Settled requests making up the balance.
+                        oldestAt:
+                          type: integer
+                          description: Unix ms when the oldest request in this accrual settled.
+                        deadlineAt:
+                          type: integer
+                          description: Unix ms by which this balance is paid regardless of size.
+
   /v1/pricing:
     get:
       operationId: getPricing
