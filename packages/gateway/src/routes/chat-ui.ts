@@ -1,5 +1,6 @@
 import type { GatewayConfig } from "@x402-mesh/shared";
 import { Router } from "express";
+import { priceHeadline } from "./landing.js";
 import type { Request, Response } from "express";
 
 import { landingEconomics } from "./landing.js";
@@ -118,7 +119,7 @@ export function renderChatUi(config: GatewayConfig): string {
     <div>
       <h1>Chat</h1>
       <div class="sub">
-        $${escapeHtml(e.inboundUsdc)} USDC per request ·
+        ${escapeHtml(priceHeadline(e))} per request ·
         <span id="meshState">checking the mesh…</span>
       </div>
     </div>
@@ -232,7 +233,9 @@ export function renderChatUi(config: GatewayConfig): string {
     $("payFrame").srcdoc = "";
   });
 
-  function currentModel() { return $("model").value || "llama-3.3-70b"; }
+  // No hardcoded default: a literal model id here outlives the node that served it,
+  // and quoting one the mesh does not serve sends the request straight to a 503.
+  function currentModel() { return $("model").value; }
   var lastPrompt = "";
 
   /** Parses an SSE byte stream, tolerating frames split across chunk boundaries. */

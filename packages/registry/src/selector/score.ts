@@ -1,4 +1,4 @@
-import { ConfigError, usdcToAtomic, type NodeRecord } from "@x402-mesh/shared";
+import { ConfigError, usdcToAtomic, type NodeRecord, normalizeModelId } from "@x402-mesh/shared";
 
 /**
  * Composite routing score.
@@ -121,7 +121,13 @@ function normalizeAtomic(value: bigint, min: bigint, max: bigint): number {
  * an operator configuration error, not a reason to fail the caller's request.
  */
 export function nodePriceAtomic(node: NodeRecord, model: string): bigint | null {
-  const capability = node.registration.capabilities.find((c) => c.model === model);
+  // Case-insensitive, matching the selector's eligibility filter and the price table. If
+  // these three disagree, a node passes the filter and then reports as unpriceable — routed
+  // past, silently, for a capability it genuinely has.
+  const wanted = normalizeModelId(model);
+  const capability = node.registration.capabilities.find(
+    (c) => normalizeModelId(c.model) === wanted,
+  );
   if (capability === undefined) return null;
   try {
     return usdcToAtomic(capability.pricePer1kTokensUsdc);

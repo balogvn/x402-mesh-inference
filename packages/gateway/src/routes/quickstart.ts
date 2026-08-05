@@ -1,4 +1,5 @@
 import type { GatewayConfig } from "@x402-mesh/shared";
+import { isSafeModelId } from "@x402-mesh/shared";
 import { Router } from "express";
 import type { NodeStorePort } from "../ports.js";
 import { EXAMPLE_REQUEST, PAID_ROUTE_PATH } from "../x402/routes.js";
@@ -61,7 +62,11 @@ export async function servableModel(store: NodeStorePort | undefined): Promise<s
       // `node.capabilities` compiles to `undefined` and silently degrades to the fallback —
       // which is exactly how the wrong model reached production the first time.
       const model = node.registration.capabilities[0]?.model;
-      if (model !== undefined && model !== "") return model;
+      // Re-validated even though registration now enforces the same charset: this value is
+      // about to be interpolated into JavaScript that a developer runs with a private key in
+      // their environment, and a record persisted before that constraint existed would
+      // otherwise sail straight through. Cheap check, catastrophic failure mode.
+      if (isSafeModelId(model)) return model;
     }
   } catch {
     // A registry hiccup must not take down a documentation page.
@@ -116,7 +121,7 @@ import { decodePaymentRequiredHeader } from "@x402/core/http";
 const ENDPOINT = "${config.publicBaseUrl}${PAID_ROUTE_PATH}";
 const body = {
   // Any model a healthy node advertises at ${config.publicBaseUrl}/v1/nodes.
-  model: "${model}",
+  model: ${JSON.stringify(model)},
   messages: [{ role: "user", content: "Reply with one word." }],
 };
 

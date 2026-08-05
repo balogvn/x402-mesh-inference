@@ -95,7 +95,11 @@ export function parseModelPrices(raw: string | undefined): ModelPrices {
     });
   }
 
-  const table: Record<string, string> = {};
+  // Null prototype, because the keys come from operator-supplied JSON. `JSON.parse` creates
+  // `__proto__` as an ordinary own property, but assigning it onto a normal object literal
+  // hits the setter instead of defining a key — the entry vanishes and, worse, the assignment
+  // can reshape the object's prototype. A null-prototype table has no setter to hit.
+  const table = Object.create(null) as Record<string, string>;
   for (const [model, price] of Object.entries(decoded)) {
     const key = normalizeModelId(model);
     if (key === "") {
@@ -139,7 +143,12 @@ export function resolveModelPrice(
   model: string | undefined,
 ): string {
   if (model === undefined) return fallback;
-  return prices[normalizeModelId(model)] ?? fallback;
+  const key = normalizeModelId(model);
+  // `Object.hasOwn`, not a bare index. A plain object inherits from Object.prototype, so
+  // `prices["constructor"]` returns a *function* and `prices["__proto__"]` an object — both
+  // non-strings that would be spliced into the x402 `price` field as `$[object Object]` and
+  // blow up amount parsing, from nothing more than a client naming its model "constructor".
+  return Object.hasOwn(prices, key) ? (prices[key] as string) : fallback;
 }
 
 /**

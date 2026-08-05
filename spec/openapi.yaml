@@ -14,7 +14,9 @@ info:
 
     1. `POST /v1/chat/completions` **without** `X-PAYMENT` → `402` with a `PaymentRequired`
        body. Its `accepts[]` carries the `exact` scheme on Algorand, the USDC ASA id, and the
-       price in **atomic units** (`"2000"` = $0.0020 USDC, 6 decimals).
+       price in **atomic units** (`"2000"` = $0.0020 USDC, 6 decimals). The amount depends on
+       the **requested model** — see `GET /v1/pricing` for the full table. The challenge
+       returned for a given request is always authoritative for that request.
     2. The client builds an atomic Algorand transaction group (the facilitator's fee-payer
        transaction plus the client's ASA transfer), base64-encodes the resulting
        `PaymentPayload` as JSON, and sends it in the `X-PAYMENT` request header.
@@ -629,7 +631,7 @@ components:
             $ref: "#/components/schemas/PaymentRequired"
           examples:
             missingPayment:
-              summary: First call — no payment attached (Algorand MainNet, $0.0020 USDC)
+              summary: First call — no payment attached (Algorand MainNet, default $0.0020 tier)
               value:
                 x402Version: 2
                 error: X-PAYMENT header is required

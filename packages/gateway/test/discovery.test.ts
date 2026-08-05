@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import request from "supertest";
-import { ALGORAND_TESTNET } from "@x402-mesh/shared";
+import { facilitatorNetwork, ALGORAND_TESTNET } from "@x402-mesh/shared";
 import { createApp } from "../src/app.js";
 import { buildManifest } from "../src/routes/discovery.js";
 import { makeConfig, StubSelector, StubSettlement, StubStore, TEST_PAY_TO } from "./helpers.js";
@@ -75,7 +75,11 @@ describe("GET /.well-known/x402", () => {
     const item = response.body.items[0];
     expect(item.resource).toBe("https://mesh.test/v1/chat/completions");
     expect(item.accepts[0].amount).toBe("2000");
-    expect(item.accepts[0].network).toBe(ALGORAND_TESTNET);
+    // The FACILITATOR form (full genesis hash), not the canonical truncated id. A client
+    // matches the challenge's `network` verbatim, so a manifest advertising the truncated
+    // form hands a discovery-configured client the exact "No network/scheme registered"
+    // failure the quickstart warns about.
+    expect(item.accepts[0].network).toBe(facilitatorNetwork(ALGORAND_TESTNET));
     expect(item.accepts[0].asset).toBe("10458941");
     expect(item.accepts[0].payTo).toBe(TEST_PAY_TO);
     expect(item.tags).toContain("x402-global-challenge");
@@ -95,7 +99,11 @@ describe("GET /.well-known/x402", () => {
     // Anything that determines where money goes comes from the live configuration.
     expect(item.resource).toBe("https://mesh.test/v1/chat/completions");
     expect(item.accepts[0].amount).toBe("2000");
-    expect(item.accepts[0].network).toBe(ALGORAND_TESTNET);
+    // The FACILITATOR form (full genesis hash), not the canonical truncated id. A client
+    // matches the challenge's `network` verbatim, so a manifest advertising the truncated
+    // form hands a discovery-configured client the exact "No network/scheme registered"
+    // failure the quickstart warns about.
+    expect(item.accepts[0].network).toBe(facilitatorNetwork(ALGORAND_TESTNET));
     expect(item.accepts[0].asset).toBe("10458941");
     expect(item.accepts[0].payTo).toBe(TEST_PAY_TO);
     expect(item.tags).toContain("x402-global-challenge");

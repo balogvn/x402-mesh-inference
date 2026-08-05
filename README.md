@@ -3,13 +3,18 @@
 **A decentralized pay-per-prompt AI inference marketplace.** Independent GPU operators register
 their hardware with a gateway, an autonomous agent calls an ordinary OpenAI-compatible
 `POST /v1/chat/completions` endpoint with no account and no API key, and the gateway answers
-`402 Payment Required` with a machine-readable x402 challenge. The agent pays **$0.0020 USDC**
-inline — settled on **Algorand** through the [GoPlausible](https://facilitator.goplausible.xyz)
-x402 facilitator, which sponsors the ALGO fee so the payment is gasless for the payer — the
-gateway routes the prompt to the healthiest node advertising that model, streams the completion
-back over SSE, and then pays that node's operator **$0.0017 USDC** on chain, keeping **$0.0003**
-as margin. Two on-chain money legs per request, both in integer atomic units, with the invariant
-`inbound − payout = margin` asserted before any funds move.
+`402 Payment Required` with a machine-readable x402 challenge. The agent pays inline, in USDC
+settled on **Algorand** through the [GoPlausible](https://facilitator.goplausible.xyz) x402
+facilitator, which sponsors the ALGO fee so the payment is gasless for the payer. The gateway
+routes the prompt to the healthiest node advertising that model, streams the completion back
+over SSE, and then pays that node's operator on chain.
+
+**Price is per request and depends on the model:** `$0.0020` USDC by default, and whatever
+`MESH_MODEL_PRICES` sets for models priced individually — `$0.0060` for
+`llama-3.3-70b-versatile` on the live deployment. The operator receives **85%** and the gateway
+keeps **15%**, so the default tier splits `$0.0017` / `$0.0003` and the `$0.0060` tier splits
+`$0.0051` / `$0.0009`. Two on-chain money legs per request, both in integer atomic units, with
+the invariant `inbound − payout = margin` asserted before any funds move.
 
 - **Protocol** x402 v2, `exact` scheme, `@x402/*@2.20.0` with `@x402/avm` (Algorand, authored by
   GoPlausible)
@@ -79,6 +84,11 @@ The two thick edges are the money. Everything else is plain HTTP.
 
 USDC on Algorand has **6 decimals**, so every amount below is an exact integer of atomic units.
 The gateway never performs floating-point arithmetic on an amount — all three legs are `bigint`.
+
+Figures below are for the **default** $0.0020 tier. A model priced by `MESH_MODEL_PRICES`
+scales all three legs: at $0.0060 the split is `6000` / `5100` / `900`. The split is always
+computed from what was **actually settled**, never from the configured price, so it follows the
+per-model tier with no extra configuration.
 
 | Leg                     | Display | Atomic units | Where it is computed                                  |
 | ----------------------- | ------- | -----------: | ----------------------------------------------------- |

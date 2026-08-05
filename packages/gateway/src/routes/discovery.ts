@@ -2,7 +2,13 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { GatewayConfig } from "@x402-mesh/shared";
-import { atomicToWire, usdcAssetId, usdcToAtomic } from "@x402-mesh/shared";
+import {
+  atomicToWire,
+  facilitatorNetwork,
+  priceTiers,
+  usdcAssetId,
+  usdcToAtomic,
+} from "@x402-mesh/shared";
 import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { Router } from "express";
 import type { Logger } from "../logger.js";
@@ -151,7 +157,8 @@ function patchManifestItem(
     ...item,
     resource: resourceUrl(config),
     x402Version: 2,
-    accepts: [paymentRequirements(config)],
+    accepts: acceptsForDiscovery(config),
+    pricing: modelPricingBlock(config),
     tags: discoveryTags(config),
     lastUpdated: new Date().toISOString(),
   };
@@ -171,7 +178,8 @@ function generateManifest(config: GatewayConfig): Record<string, unknown> {
         resource: resourceUrl(config),
         type: "http",
         x402Version: 2,
-        accepts: [paymentRequirements(config)],
+        accepts: acceptsForDiscovery(config),
+        pricing: modelPricingBlock(config),
         description: SERVICE_DESCRIPTION,
         mimeType: "application/json",
         serviceName: SERVICE_NAME,
@@ -194,15 +202,70 @@ function generateManifest(config: GatewayConfig): Record<string, unknown> {
  * `amount` is the integer atomic-unit string the protocol expects — derived from the
  * configured decimal price through `usdcToAtomic`, never by multiplying a float.
  */
-export function paymentRequirements(config: GatewayConfig): Record<string, unknown> {
+export function paymentRequirements(
+  config: GatewayConfig,
+  priceUsdc?: string,
+): Record<string, unknown> {
+  const quoted = priceUsdc ?? config.inboundPriceUsdc;
   return {
     scheme: "exact",
-    network: config.network,
+    // The facilitator-facing (full genesis hash) form, matching what the 402 challenge
+    // carries. The manifest previously emitted the canonical truncated id, so a client that
+    // configured itself from discovery matched the challenge's `network` verbatim, failed,
+    // and got "No network/scheme registered for x402 version: 2" — the exact trap the
+    // quickstart warns about, handed to the client by our own discovery document.
+    network: facilitatorNetwork(config.network),
     asset: usdcAssetId(config.network),
-    amount: atomicToWire(usdcToAtomic(config.inboundPriceUsdc)),
+    amount: atomicToWire(usdcToAtomic(quoted)),
     payTo: config.payToAddress,
     maxTimeoutSeconds: maxTimeoutSeconds(config),
     extra: { name: "USDC", decimals: 6 },
+  };
+}
+
+/**
+ * Every payment option the resource accepts — one per distinct price tier.
+ *
+ * A single entry was wrong the moment pricing became per-model: the manifest advertised the
+ * flat fallback while the only model any node served cost three times that, so an agent
+ * building its payment from discovery would sign the wrong amount and be re-challenged.
+ * `accepts` is an array precisely so a resource can offer more than one requirement.
+ *
+ * The fallback is listed first, matching {@link priceTiers}. Which tier applies to a given
+ * request is decided by the model in that request, so {@link modelPricingBlock} carries the
+ * mapping and the per-request 402 challenge remains authoritative.
+ */
+export function acceptsForDiscovery(config: GatewayConfig): Record<string, unknown>[] {
+  return priceTiers(config.modelPricesUsdc, config.inboundPriceUsdc).map((price) =>
+    paymentRequirements(config, price),
+  );
+}
+
+/**
+ * The model → price mapping, attached to the manifest so `accepts` is interpretable.
+ *
+ * Without it a client sees several amounts and no rule for choosing between them.
+ */
+export function modelPricingBlock(config: GatewayConfig): Record<string, unknown> {
+  const table = pricingTable(config);
+  return {
+    unit: "request",
+    asset: usdcAssetId(config.network),
+    decimals: 6,
+    default: {
+      usdc: table.default,
+      amount: atomicToWire(usdcToAtomic(table.default)),
+    },
+    models: table.models.map((m) => ({
+      model: m.model,
+      usdc: m.usdc,
+      amount: atomicToWire(usdcToAtomic(m.usdc)),
+    })),
+    endpoint: `${config.publicBaseUrl}/v1/pricing`,
+    note:
+      "Price is per request and depends on the requested model; models not listed are " +
+      "charged the default. Send the model in the request body and the 402 challenge for " +
+      "that request is authoritative.",
   };
 }
 
@@ -233,7 +296,7 @@ function liveBlock(config: GatewayConfig): string {
     `- price: $${config.inboundPriceUsdc} USDC per request (${atomic} atomic units, 6 decimals)`,
     ...(Object.keys(config.modelPricesUsdc).length > 0
       ? [
-          "- pricing: per-model; the price above applies to any model not listed below",
+          "- perModelPricing: the price above applies to any model not listed below",
           ...pricingTable(config).models.map((m) => `  - ${m.model}: $${m.usdc} USDC`),
         ]
       : []),
@@ -245,7 +308,7 @@ function liveBlock(config: GatewayConfig): string {
     `- maxTimeoutSeconds: ${maxTimeoutSeconds(config)}`,
     `- tags: ${discoveryTags(config).join(", ")}`,
     `- discovery: ${config.publicBaseUrl}/.well-known/x402`,
-    `- pricing: ${config.publicBaseUrl}/v1/pricing`,
+    `- pricingEndpoint: ${config.publicBaseUrl}/v1/pricing`,
     `- quickstart: ${config.publicBaseUrl}/quickstart (runnable client, no wallet needed to read)`,
     `- nodes: ${config.publicBaseUrl}/v1/nodes`,
     `- settlements: ${config.publicBaseUrl}/v1/settlements`,

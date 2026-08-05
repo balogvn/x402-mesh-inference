@@ -2,6 +2,7 @@ import {
   NoCapacityError,
   atomicToUsdc,
   type NodeRecord,
+  normalizeModelId,
   type NodeSelection,
 } from "@x402-mesh/shared";
 import type { NodeStore } from "../store/types.js";
@@ -112,7 +113,15 @@ export class NodeSelector {
         tally.unhealthy += 1;
         continue;
       }
-      if (!record.registration.capabilities.some((c) => c.model === model)) {
+      // Compared case-insensitively, to match how the price is resolved. Pricing normalizes
+      // the model id but this used exact equality, so `LLAMA-3.3-70B-Versatile` was quoted
+      // the premium tier and then could never be routed — the client is charged for a
+      // capability the selector refuses to find.
+      if (
+        !record.registration.capabilities.some(
+          (c) => normalizeModelId(c.model) === normalizeModelId(model),
+        )
+      ) {
         tally.wrongModel += 1;
         continue;
       }

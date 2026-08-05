@@ -1,5 +1,6 @@
 import type { GatewayConfig } from "@x402-mesh/shared";
 import { atomicToUsdc, computeSplit, usdcAssetId, usdcToAtomic } from "@x402-mesh/shared";
+import { pricingTable } from "../x402/routes.js";
 import { Router } from "express";
 import type { Response } from "express";
 import type { Logger } from "../logger.js";
@@ -152,17 +153,31 @@ export async function defaultFacilitatorProbe(config: GatewayConfig): Promise<Ch
  * documented split and the paid split cannot drift apart.
  */
 export function economics(config: GatewayConfig): Record<string, unknown> {
-  const inbound = usdcToAtomic(config.inboundPriceUsdc);
-  const split = computeSplit(inbound, config.marginBps);
+  const tier = (usdc: string): Record<string, string> => {
+    const split = computeSplit(usdcToAtomic(usdc), config.marginBps);
+    return {
+      inboundAtomic: split.inbound.toString(10),
+      payoutAtomic: split.payout.toString(10),
+      marginAtomic: split.margin.toString(10),
+      inboundUsdc: atomicToUsdc(split.inbound),
+      payoutUsdc: atomicToUsdc(split.payout),
+      marginUsdc: atomicToUsdc(split.margin),
+    };
+  };
+
   return {
-    inboundAtomic: split.inbound.toString(10),
-    payoutAtomic: split.payout.toString(10),
-    marginAtomic: split.margin.toString(10),
-    inboundUsdc: atomicToUsdc(split.inbound),
-    payoutUsdc: atomicToUsdc(split.payout),
-    marginUsdc: atomicToUsdc(split.margin),
+    // The unqualified keys stay, for consumers that read them, but they are now explicitly
+    // scoped to the default tier. Left unlabelled they read as *the* split, which is how
+    // this endpoint came to serve 2000/1700/300 in the same document as a 6000/5100/900
+    // settlement row — the audit surface contradicting its own ledger.
+    ...tier(config.inboundPriceUsdc),
+    appliesTo: "requests for a model not listed in `models`",
+    models: pricingTable(config).models.map((m) => ({ model: m.model, ...tier(m.usdc) })),
     marginBps: config.marginBps,
     invariant: "inbound - payout === margin",
+    note:
+      "Price is per request and depends on the requested model. Settlement rows record what " +
+      "was actually charged, which is the tier for that request's model.",
   };
 }
 

@@ -102,9 +102,48 @@ export const EndpointUrlSchema = z
     "endpoint must use http or https",
   );
 
+/**
+ * Characters a model id may contain.
+ *
+ * Deliberately narrow, and a security boundary rather than a tidiness rule. A model id is
+ * **attacker-controlled**: node registration is open, so anyone may register a node
+ * advertising any capability string. That string is then interpolated into places where a
+ * quote or a backslash changes the meaning of the surrounding text — most sharply into the
+ * JavaScript source of `GET /quickstart/pay.mjs`, which developers are told to download and
+ * run *with `AVM_PRIVATE_KEY` in their environment*. An unrestricted id there is remote code
+ * execution against an integrator's wallet.
+ *
+ * The set covers every real model id shape in use — `llama-3.3-70b-versatile`, `gpt-4o`,
+ * `llama3.1:8b`, `meta-llama/Llama-3-8b`, `mistral-7b-instruct-v0.2` — and contains no
+ * quote, backslash, backtick, `$`, whitespace or control character, so it cannot break out
+ * of a JS string literal, a single-quoted shell argument, an HTML attribute or a JSON string.
+ *
+ * Escaping at each sink is still applied; this is the root fix, not a substitute for it.
+ */
+const MODEL_ID_RE = /^[A-Za-z0-9._:/-]+$/;
+
+/** Shared model-id validator. See {@link MODEL_ID_RE} for why the charset is restricted. */
+export const ModelIdSchema = z
+  .string()
+  .min(1, "model is required")
+  .max(200, "model name is too long")
+  .regex(MODEL_ID_RE, "model may contain only letters, digits and . _ : / -");
+
+/**
+ * Runtime guard for values that did not arrive through a zod schema.
+ *
+ * Used at interpolation sinks so a record persisted before this constraint existed cannot
+ * poison a page rendered today.
+ */
+export function isSafeModelId(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.length > 0 && value.length <= 200 && MODEL_ID_RE.test(value)
+  );
+}
+
 export const NodeCapabilitySchema = z
   .object({
-    model: z.string().min(1, "model is required").max(200, "model name is too long"),
+    model: ModelIdSchema,
     contextWindow: z
       .number()
       .int("contextWindow must be an integer")
@@ -234,7 +273,7 @@ export const ChatMessageSchema = z.object({
 });
 
 export const ChatCompletionRequestSchema = z.object({
-  model: z.string().min(1, "model is required").max(200, "model name is too long"),
+  model: ModelIdSchema,
   messages: z.array(ChatMessageSchema).min(1, "messages must not be empty").max(512),
   stream: z.boolean().optional(),
   max_tokens: z

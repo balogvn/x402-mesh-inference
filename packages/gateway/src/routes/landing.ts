@@ -8,6 +8,7 @@ import {
   usdcToAtomic,
 } from "@x402-mesh/shared";
 import { Router } from "express";
+import { pricingTable } from "../x402/routes.js";
 import type { Request, Response } from "express";
 
 /**
@@ -56,6 +57,16 @@ interface Economics {
   payoutUsdc: string;
   marginUsdc: string;
   marginBps: number;
+  /** Per-model tiers, empty under flat pricing. Cheapest first. */
+  tiers: {
+    model: string;
+    inboundUsdc: string;
+    payoutUsdc: string;
+    marginUsdc: string;
+    inboundAtomic: string;
+    payoutAtomic: string;
+    marginAtomic: string;
+  }[];
   asset: string;
   network: string;
   wireNetwork: string;
@@ -81,10 +92,51 @@ export function landingEconomics(config: GatewayConfig): Economics {
     payoutUsdc: atomicToUsdc(split.payout),
     marginUsdc: atomicToUsdc(split.margin),
     marginBps: config.marginBps,
+    tiers: pricingTable(config).models.map((m) => {
+      const t = computeSplit(usdcToAtomic(m.usdc), config.marginBps);
+      return {
+        model: m.model,
+        inboundUsdc: atomicToUsdc(t.inbound),
+        payoutUsdc: atomicToUsdc(t.payout),
+        marginUsdc: atomicToUsdc(t.margin),
+        inboundAtomic: atomicToWire(t.inbound),
+        payoutAtomic: atomicToWire(t.payout),
+        marginAtomic: atomicToWire(t.margin),
+      };
+    }),
     asset: usdcAssetId(config.network),
     network: config.network,
     wireNetwork: facilitatorNetwork(config.network),
   };
+}
+
+/**
+ * The price sentence for the hero.
+ *
+ * Under per-model pricing there is no single number to quote. Stating one anyway is how the
+ * page came to advertise "$0.002000 USDC" as *the* price while every model the mesh could
+ * actually serve cost three times that.
+ */
+export function priceHeadline(e: Economics): string {
+  if (e.tiers.length === 0) return `$${e.inboundUsdc} USDC`;
+  const prices = [e.inboundUsdc, ...e.tiers.map((t) => t.inboundUsdc)];
+  const low = prices.reduce((a, b) => (Number(a) <= Number(b) ? a : b));
+  const high = prices.reduce((a, b) => (Number(a) >= Number(b) ? a : b));
+  return low === high ? `$${low} USDC` : `$${low}–$${high} USDC, by model`;
+}
+
+/** Rows for the cost table: the fallback tier, then one per individually-priced model. */
+export function tierRows(e: Economics): string {
+  const row = (
+    label: string,
+    t: { inboundUsdc: string; payoutUsdc: string; marginUsdc: string; inboundAtomic: string },
+  ): string =>
+    `<tr><td>${escapeHtml(label)}</td><td>$${escapeHtml(t.inboundUsdc)}</td>` +
+    `<td>$${escapeHtml(t.payoutUsdc)}</td><td>$${escapeHtml(t.marginUsdc)}</td>` +
+    `<td class="num">${escapeHtml(t.inboundAtomic)}</td></tr>`;
+
+  const fallbackLabel = e.tiers.length === 0 ? "Every request" : "Any other model";
+  return [...e.tiers.map((t) => row(t.model, t)), row(fallbackLabel, e)].join("\n      ");
 }
 
 /**
@@ -179,7 +231,7 @@ export function renderLanding(config: GatewayConfig): string {
   <h1>x402 Mesh Inference</h1>
   <p class="lede">
     Pay-per-prompt AI inference. An agent calls an ordinary OpenAI-compatible endpoint with
-    no account and no API key, pays <b>$${escapeHtml(e.inboundUsdc)} USDC</b> inline over
+    no account and no API key, pays <b>${escapeHtml(priceHeadline(e))}</b> inline over
     HTTP 402, and the prompt is routed to an independent GPU operator who is paid on chain.
   </p>
 
@@ -207,11 +259,9 @@ export function renderLanding(config: GatewayConfig): string {
     <code>inbound − payout = margin</code> before any funds move.
   </p>
   <table>
-    <thead><tr><th>Leg</th><th>Display</th><th class="num">Atomic</th></tr></thead>
+    <thead><tr><th>Model</th><th>Client pays</th><th>Operator gets</th><th>Margin</th><th class="num">Atomic in</th></tr></thead>
     <tbody>
-      <tr><td>Client → gateway</td><td>$${escapeHtml(e.inboundUsdc)}</td><td class="num">${escapeHtml(e.inboundAtomic)}</td></tr>
-      <tr><td>Gateway → node operator</td><td>$${escapeHtml(e.payoutUsdc)}</td><td class="num">${escapeHtml(e.payoutAtomic)}</td></tr>
-      <tr><td>Gateway margin (${escapeHtml(String(e.marginBps))} bps)</td><td>$${escapeHtml(e.marginUsdc)}</td><td class="num">${escapeHtml(e.marginAtomic)}</td></tr>
+      ${tierRows(e)}
     </tbody>
   </table>
 
