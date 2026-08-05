@@ -10,3 +10,6 @@ coverage/
 .vitest-reports/
 .wallets/
 .flake-hunt/
+
+# Local-only working files: correspondence drafts, scratch notes. Never committed.
+.local/
