@@ -1096,7 +1096,7 @@ operator **+1700**, with precisely one transfer to the operator and no double pa
 > returns nothing for a truncated one. A failing lookup is treated as _unknown_, never as a
 > settlement, so a flaky indexer degrades to the old behaviour rather than inventing a payout.
 
-<!-- TODO: demo video link -->
+<!-- Demo video: script at docs/demo-video-script.md; paste the link here once recorded. -->
 
 ---
 
