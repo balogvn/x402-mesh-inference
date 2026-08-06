@@ -185,7 +185,12 @@ export function buildPaymentOption(config: GatewayConfig, priceUsdc?: string): R
  * instead of merging would silently drop the tag again.
  */
 export function challengeExtra(config: GatewayConfig): Record<string, unknown> {
-  return { tag: config.challengeTag };
+  // `asset` alongside `tag`, both required. Confirmed by the organisers and by the catalog:
+  // all 57 entries the challenge filter shows carry both, and this service — which carried
+  // only `tag` — was in the general Bazaar and absent from the challenge one. The scheme
+  // already resolves the asset for settlement, so this is redundant to the protocol and load
+  // bearing for discovery, which is exactly the kind of duplication that is easy to miss.
+  return { asset: usdcAssetId(config.network), tag: config.challengeTag };
 }
 
 /**

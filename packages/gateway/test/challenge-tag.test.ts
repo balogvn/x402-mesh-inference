@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
-import { CHALLENGE_TAG } from "@x402-mesh/shared";
+import { ALGORAND_MAINNET, ALGORAND_TESTNET, CHALLENGE_TAG } from "@x402-mesh/shared";
 import { decodePaymentRequiredHeader } from "@x402/core/http";
 import { createApp } from "../src/app.js";
+import { challengeExtra } from "../src/x402/routes.js";
 import { buildResourceServer } from "../src/x402/server.js";
 import {
   makeConfig,
@@ -59,6 +60,25 @@ describe("the challenge tag reaches the payment requirement", () => {
     expect(extra["tag"], "the Bazaar challenge filter reads accepts[].extra.tag").toBe(
       CHALLENGE_TAG,
     );
+  });
+
+  it("carries the asset id alongside the tag, which the filter also requires", async () => {
+    // Both, not either. All 57 entries the challenge filter shows carry `asset` and `tag`;
+    // this service carried only `tag` and appeared in the general Bazaar but not the
+    // challenge one. Confirmed by the organisers: "each route includes extra: { asset, tag }".
+    const extra = await challengeExtraOnWire(buildApp());
+    expect(extra["asset"], "USDC ASA id must be in extra for the challenge filter").toBe(
+      "10458941",
+    );
+    expect(extra["tag"]).toBe(CHALLENGE_TAG);
+  });
+
+  it("uses the asset id for the configured network, not a hardcoded one", () => {
+    // A MainNet deployment advertising the TestNet ASA would be tagged and wrong. Asserted on
+    // the function rather than the wire because the stub facilitator only advertises TestNet,
+    // so a MainNet route cannot be built against it.
+    expect(challengeExtra(makeConfig({ network: ALGORAND_TESTNET }))["asset"]).toBe("10458941");
+    expect(challengeExtra(makeConfig({ network: ALGORAND_MAINNET }))["asset"]).toBe("31566704");
   });
 
   it("does not displace whatever the scheme itself puts in extra", async () => {
