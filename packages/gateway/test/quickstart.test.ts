@@ -76,6 +76,22 @@ describe("quickstart", () => {
     expect(snippet).not.toContain("mesh.example.com");
   });
 
+  it("surfaces WHY a payment was rejected, not just that it was", () => {
+    // Observed against the live deployment: an underfunded payer got `Error: 402: {}`. The
+    // real cause — "underflow on subtracting 6000 from sender amount 4146" — was sitting in
+    // the payment-required header of the retry response, which the snippet discarded because
+    // it only read the body. The body on that path is `{}`.
+    const snippet = quickstartClient(makeConfig(), MODEL);
+    expect(snippet).toContain("failureReason");
+    // It must decode the header, not just re-read the body it already knows is empty.
+    const helper = snippet.slice(snippet.indexOf("async function failureReason"));
+    expect(helper).toContain("payment-required");
+    expect(helper).toContain("decodePaymentRequiredHeader");
+    expect(helper).toContain("decoded.error");
+    // And still fall back to the body rather than throwing away a non-x402 error.
+    expect(helper).toContain("response.text()");
+  });
+
   it("never embeds a key, only reads one from the environment", () => {
     const snippet = quickstartClient(makeConfig(), MODEL);
     expect(snippet).toContain("process.env.AVM_PRIVATE_KEY");

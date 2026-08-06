@@ -141,6 +141,23 @@ const post = (headers) =>
     body: JSON.stringify(body),
   });
 
+// Why a PAYMENT was rejected also arrives in the \`payment-required\` header, not the body.
+// The body on that path is literally \`{}\`, so reading it reports "402: {}" and throws the
+// answer away. The header decodes to the real cause — e.g. "underflow on subtracting 6000
+// from sender amount 4146", which tells you exactly how underfunded the payer is.
+async function failureReason(response) {
+  const header = response.headers.get("payment-required");
+  if (header) {
+    try {
+      const decoded = decodePaymentRequiredHeader(header);
+      if (decoded.error) return decoded.error;
+    } catch {
+      // fall through to the body
+    }
+  }
+  return (await response.text()) || response.statusText;
+}
+
 const unpaid = await post({});
 if (unpaid.status !== 402) throw new Error(\`expected 402, got \${unpaid.status}\`);
 
@@ -152,7 +169,7 @@ console.log("price:", challenge.accepts[0].amount, "atomic USDC");
 // Spread the header MAP the SDK returns. The name is part of the protocol: x402 v2 expects
 // \`PAYMENT-SIGNATURE\`, and renaming it to \`X-PAYMENT\` makes the server answer 402 again.
 const paid = await post(http.encodePaymentSignatureHeader(await http.createPaymentPayload(challenge)));
-if (!paid.ok) throw new Error(\`\${paid.status}: \${await paid.text()}\`);
+if (!paid.ok) throw new Error(\`\${paid.status}: \${await failureReason(paid)}\`);
 
 const completion = await paid.json();
 console.log(completion.choices[0].message.content);
