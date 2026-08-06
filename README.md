@@ -38,6 +38,7 @@ the invariant `inbound − payout = margin` asserted before any funds move.
 - [Repository layout](#repository-layout)
 - [Testing and CI](#testing-and-ci)
 - [Security notes](#security-notes)
+- [What shipping payments taught us](docs/what-shipping-payments-taught-us.md)
 - [Algorand x402 Global Challenge submission](#algorand-x402-global-challenge-submission)
 
 ---
