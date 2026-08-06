@@ -46,3 +46,6 @@ export type { NodeStore, RequestOutcome } from "./types.js";
 
 export { RedisAccrualStore, createAccrualStore } from "./accruals.js";
 export type { AccrualStore, PersistedAccrual } from "./accruals.js";
+
+export { RedisLedgerStore, createLedgerStore } from "./ledger.js";
+export type { LedgerStore } from "./ledger.js";

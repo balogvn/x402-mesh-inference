@@ -1,7 +1,12 @@
 import type { Server } from "node:http";
 import type { GatewayConfig } from "@x402-mesh/shared";
 import { loadGatewayConfig, toErrorResponse } from "@x402-mesh/shared";
-import { createAccrualStore, createNodeStore, NodeSelector } from "@x402-mesh/registry";
+import {
+  createAccrualStore,
+  createLedgerStore,
+  createNodeStore,
+  NodeSelector,
+} from "@x402-mesh/registry";
 import { createApp } from "./app.js";
 import type { GatewayDeps } from "./app.js";
 import { createLogger } from "./logger.js";
@@ -88,11 +93,13 @@ async function buildDeps(
   // Durable accrual storage, so a crash cannot lose the record of what the gateway owes.
   // Absent when REDIS_URL is unset or unreachable; the settlement service says so loudly.
   const accrualStore = await createAccrualStore(config.redisUrl, { logger: console });
+  const ledgerStore = await createLedgerStore(config.redisUrl, { logger: console });
   const settlement = new DoubleSettlementService({
     config,
     payer,
     logger,
     ...(accrualStore !== undefined ? { accrualStore } : {}),
+    ...(ledgerStore !== undefined ? { ledgerStore } : {}),
   });
   // Before the listener opens: money owed by a previous process is paid first, and doing it
   // here means the ledger already reflects it by the time anyone can query /v1/settlements.

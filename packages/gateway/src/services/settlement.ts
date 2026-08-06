@@ -7,7 +7,7 @@ import {
   usdcToAtomic,
   SettlementError,
 } from "@x402-mesh/shared";
-import type { AccrualStore, PersistedAccrual } from "@x402-mesh/registry";
+import type { AccrualStore, LedgerStore, PersistedAccrual } from "@x402-mesh/registry";
 import type { Logger } from "../logger.js";
 import type {
   Clock,
@@ -98,6 +98,14 @@ export interface SettlementDeps {
    * was owed what.
    */
   accrualStore?: AccrualStore;
+  /**
+   * Durable store for the audit ledger. Omit to keep it in memory only.
+   *
+   * The ledger is the only place the per-request `inbound - payout = margin` split is written
+   * down; the chain shows the transfers but not the accounting behind them. Without this it
+   * resets on every deploy.
+   */
+  ledgerStore?: LedgerStore;
 }
 
 /** What the chat route knows at routing time, before the inbound payment settles. */
@@ -206,6 +214,9 @@ export class DoubleSettlementService implements SettlementServicePort {
   /** Durable accrual storage, when configured. */
   private readonly accrualStore: AccrualStore | undefined;
 
+  /** Durable audit-ledger storage, when configured. */
+  private readonly ledgerStore: LedgerStore | undefined;
+
   /**
    * Per-operator serialization of durable writes.
    *
@@ -231,6 +242,7 @@ export class DoubleSettlementService implements SettlementServicePort {
     this.assetId = usdcAssetId(this.config.network);
     this.batchMinAtomic = usdcToAtomic(this.config.payoutBatchMinUsdc);
     this.accrualStore = deps.accrualStore;
+    this.ledgerStore = deps.ledgerStore;
 
     if (this.batchMinAtomic > 0n && this.accrualStore === undefined) {
       // Deliberate risk, said out loud. Batching without persistence means a hard crash
@@ -283,6 +295,39 @@ export class DoubleSettlementService implements SettlementServicePort {
   }
 
   /**
+   * Reloads the audit ledger from storage at boot.
+   *
+   * Without it `/v1/settlements` reported only what had happened since the last deploy, which
+   * made a routine restart look like the history had been wiped. Records are inserted
+   * oldest-first so the in-memory map's insertion order — which the eviction loop depends on —
+   * matches the order the store already keeps.
+   *
+   * Never throws: history is worth having, never worth refusing to start for.
+   */
+  private async hydrateLedger(): Promise<void> {
+    if (this.ledgerStore === undefined) return;
+    try {
+      const recent = await this.ledgerStore.loadRecent(this.maxLedgerEntries);
+      // loadRecent returns newest-first; the ledger map is oldest-first.
+      for (const raw of [...recent].reverse()) {
+        const record = raw as SettlementRecord;
+        if (typeof record?.requestId !== "string") continue;
+        this.ledger.set(record.requestId, record);
+        // A request already in the ledger must never be paid again, whatever arrives later.
+        this.claimed.add(record.requestId);
+      }
+      if (recent.length > 0) {
+        this.logger.info({ rows: recent.length }, "settlement ledger restored from storage");
+      }
+    } catch (error) {
+      this.logger.warn(
+        { reason: describe(error) },
+        "could not restore the settlement ledger; history starts from this boot",
+      );
+    }
+  }
+
+  /**
    * Drops a stored batch record once its payout SETTLED.
    *
    * Only on success. A failed payout keeps its record: the operator has not been paid, so the
@@ -312,6 +357,7 @@ export class DoubleSettlementService implements SettlementServicePort {
    * Never throws — a gateway that cannot reach Redis must still start and serve.
    */
   async recoverAccruals(): Promise<void> {
+    await this.hydrateLedger();
     if (this.accrualStore === undefined) return;
 
     let loaded: Awaited<ReturnType<AccrualStore["loadAll"]>>;
@@ -960,11 +1006,26 @@ export class DoubleSettlementService implements SettlementServicePort {
     // ordering the eviction loop relies on survives this update.
     if (!this.ledger.has(requestId)) return;
     this.ledger.set(requestId, record);
+    // Persisted on update too: `pending` -> `settled`/`failed` is the transition the audit
+    // trail exists to record, and storing only the insert would keep a permanent lie.
+    this.persistLedger(record);
+  }
+
+  /** Persists one ledger row, so the audit trail outlives the process. */
+  private persistLedger(record: SettlementRecord): void {
+    if (this.ledgerStore === undefined) return;
+    const store = this.ledgerStore;
+    // Chained on the request id so a terminal update cannot land before the insert it
+    // supersedes. The key is namespaced to keep it out of the per-operator accrual chains.
+    this.enqueueWrite(`ledger:${record.requestId}`, () =>
+      store.put(record.requestId, record, this.maxLedgerEntries),
+    );
   }
 
   /** Inserts a record and evicts the oldest once the ledger is full. */
   private remember(record: SettlementRecord): void {
     this.ledger.set(record.requestId, record);
+    this.persistLedger(record);
     while (this.ledger.size > this.maxLedgerEntries) {
       const oldest = this.ledger.keys().next();
       if (oldest.done) break;

@@ -38,3 +38,6 @@ export type {
 
 export { RedisAccrualStore, createAccrualStore } from "./store/accruals.js";
 export type { AccrualStore, PersistedAccrual } from "./store/accruals.js";
+
+export { RedisLedgerStore, createLedgerStore } from "./store/ledger.js";
+export type { LedgerStore } from "./store/ledger.js";
