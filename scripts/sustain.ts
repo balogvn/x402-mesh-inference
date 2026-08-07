@@ -23,6 +23,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import type { Redis } from "ioredis";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import {
@@ -45,6 +46,22 @@ const MAX_CONSECUTIVE_FAILURES = 3;
 /** Floor below which we will not start at all, regardless of `--floor`. */
 const ABSOLUTE_MIN_INTERVAL_S = 10;
 
+/**
+ * Redis key holding today's spend, in atomic USDC, under a UTC date.
+ *
+ * `--budget` alone is worthless once this runs unattended: it lives in process memory, so a
+ * crash-loop resets it on every restart and the "hard ceiling" becomes a ceiling per restart.
+ * A supervisor restarting a container ten times would spend ten budgets and every one of them
+ * would look correct in the logs.
+ *
+ * Keyed by UTC date so the cap is per day rather than per lifetime, and expiring so the
+ * keyspace does not grow. Redis is the same instance the gateway already uses for accruals.
+ */
+const SPEND_KEY_PREFIX = "x402mesh:sustain:spend:";
+
+/** Two days, so yesterday's counter survives a UTC-midnight restart long enough to be read. */
+const SPEND_KEY_TTL_S = 172_800;
+
 interface Wallet {
   algo: number;
   usdc: number;
@@ -64,6 +81,11 @@ Options:
   --floor <usdc>       Stop when the payer falls to this balance. Default 0.002.
   --interval <sec>     Seconds between requests. Default 300 (5 min). Minimum ${ABSOLUTE_MIN_INTERVAL_S}.
   --max-requests <n>   Stop after this many successful settlements. Default 1000.
+  --daily-budget <usdc> Spend cap per UTC day, tracked in Redis so it survives restarts.
+                        REQUIRED when --forever is set. Needs --redis-url or REDIS_URL.
+  --forever            Keep running past --budget/--max-requests, resetting each UTC day.
+                        Intended for an always-on host. Requires --daily-budget.
+  --redis-url <url>    Redis for the daily counter. Defaults to $REDIS_URL.
   --url <url>          Paid endpoint. Default the live /v1/inference.
   --model <id>         Model to request. Default llama-3.3-70b-versatile.
   --wallet <path>      Payer env file holding AVM_PRIVATE_KEY. Default .wallets/client-mainnet.env.
@@ -72,6 +94,55 @@ Options:
 The four stop conditions are budget, floor, max-requests and consecutive failures. Whichever
 trips first ends the run.
 `);
+}
+
+/**
+ * Today's spend counter, backed by Redis so it survives a restart.
+ *
+ * `incrBy` is the whole point: two runners, or one runner restarted mid-day, both add to the
+ * same total rather than each believing they have a fresh budget.
+ */
+class DailySpend {
+  #redis: Redis | undefined;
+
+  constructor(private readonly url: string | undefined) {}
+
+  async connect(): Promise<void> {
+    if (this.url === undefined || this.url.trim() === "") return;
+    const { Redis } = await import("ioredis");
+    const client = new Redis(this.url, { lazyConnect: true, maxRetriesPerRequest: 2 });
+    client.on("error", () => undefined);
+    await client.connect();
+    this.#redis = client;
+  }
+
+  get available(): boolean {
+    return this.#redis !== undefined;
+  }
+
+  #key(): string {
+    return `${SPEND_KEY_PREFIX}${new Date().toISOString().slice(0, 10)}`;
+  }
+
+  /** Atomic USDC spent today. Zero when Redis is absent. */
+  async spentToday(): Promise<bigint> {
+    if (this.#redis === undefined) return 0n;
+    const value = await this.#redis.get(this.#key());
+    return BigInt(value ?? "0");
+  }
+
+  /** Records a settlement and returns the new daily total. */
+  async record(atomic: bigint): Promise<bigint> {
+    if (this.#redis === undefined) return 0n;
+    const key = this.#key();
+    const total = await this.#redis.incrby(key, Number(atomic));
+    await this.#redis.expire(key, SPEND_KEY_TTL_S);
+    return BigInt(total);
+  }
+
+  async close(): Promise<void> {
+    await this.#redis?.quit().catch(() => undefined);
+  }
 }
 
 /** Reads USDC and ALGO for an address from the public MainNet API. */
@@ -154,6 +225,9 @@ async function main(): Promise<void> {
   const floor = Number(args.options.get("floor") ?? "0.002");
   const intervalS = Number(args.options.get("interval") ?? "300");
   const maxRequests = Number(args.options.get("max-requests") ?? "1000");
+  const dailyBudget = Number(args.options.get("daily-budget") ?? "0");
+  const forever = args.flags.has("forever");
+  const redisUrl = args.options.get("redis-url") ?? process.env["REDIS_URL"];
   const dryRun = args.flags.has("dry-run");
   const consented = args.flags.has("i-understand-this-spends-real-money");
 
@@ -173,6 +247,28 @@ async function main(): Promise<void> {
   if (intervalS < ABSOLUTE_MIN_INTERVAL_S) {
     info(style.red(`--interval must be at least ${ABSOLUTE_MIN_INTERVAL_S}s; refusing to hammer`));
     process.exit(EXIT_REFUSED);
+  }
+
+  // --forever without an enforceable daily cap is the dangerous combination: an unattended
+  // process whose only spend limit resets every time a supervisor restarts it.
+  if (forever && !(dailyBudget > 0)) {
+    info(style.red("--forever requires --daily-budget: an in-memory budget resets on restart"));
+    process.exit(EXIT_REFUSED);
+  }
+
+  const spend = new DailySpend(redisUrl);
+  if (dailyBudget > 0) {
+    try {
+      await spend.connect();
+    } catch (error) {
+      info(style.red(`--daily-budget needs Redis and it is unreachable: ${errorMessage(error)}`));
+      process.exit(EXIT_REFUSED);
+    }
+    if (!spend.available) {
+      info(style.red("--daily-budget set but no Redis configured (--redis-url or REDIS_URL)"));
+      info(style.dim("without it the cap cannot survive a restart, which is the whole point"));
+      process.exit(EXIT_REFUSED);
+    }
   }
 
   const key = readPrivateKey(walletPath);
@@ -211,6 +307,14 @@ async function main(): Promise<void> {
   let consecutiveFailures = 0;
   const budgetAtomic = BigInt(Math.floor(budget * 1e6));
   const floorAtomic = BigInt(Math.floor(floor * 1e6));
+  const dailyAtomic = BigInt(Math.floor(dailyBudget * 1e6));
+
+  if (dailyAtomic > 0n) {
+    const already = await spend.spentToday();
+    info(
+      `daily      ${(Number(already) / 1e6).toFixed(6)}/${dailyBudget.toFixed(6)} USDC spent today`,
+    );
+  }
 
   // Stop cleanly on Ctrl-C rather than dying mid-request.
   let stopping = false;
@@ -219,7 +323,7 @@ async function main(): Promise<void> {
     stopping = true;
   });
 
-  while (!stopping && settled < maxRequests) {
+  while (!stopping && (forever || settled < maxRequests)) {
     const wallet = await readWallet(payer.address, "31566704");
     const balanceAtomic = BigInt(Math.floor(wallet.usdc * 1e6));
 
@@ -227,7 +331,21 @@ async function main(): Promise<void> {
       info(style.yellow(`stop: balance ${wallet.usdc.toFixed(6)} reached the floor`));
       break;
     }
-    if (spentAtomic >= budgetAtomic) {
+    if (dailyAtomic > 0n) {
+      const today = await spend.spentToday();
+      if (today >= dailyAtomic) {
+        if (!forever) {
+          info(style.yellow(`stop: daily cap of ${dailyBudget.toFixed(6)} USDC reached`));
+          break;
+        }
+        // Idle until the UTC day rolls over rather than exiting. Exiting would let a
+        // supervisor restart us into a fresh process budget; sleeping keeps the cap real.
+        info(style.dim(`daily cap reached; idling until the next UTC day`));
+        await sleep(Math.min(3_600_000, intervalS * 1000 * 12));
+        continue;
+      }
+    }
+    if (spentAtomic >= budgetAtomic && !forever) {
       info(style.yellow(`stop: budget of ${budget.toFixed(6)} USDC spent`));
       break;
     }
@@ -236,6 +354,7 @@ async function main(): Promise<void> {
       const amount = await payOnce(url, model, payer);
       spentAtomic += amount;
       settled += 1;
+      if (dailyAtomic > 0n) await spend.record(amount);
       consecutiveFailures = 0;
       info(
         `${style.green("settled")} #${settled}  ${amount} atomic  ` +
@@ -254,10 +373,12 @@ async function main(): Promise<void> {
     // Sleep only when another request is actually coming. Sleeping after the final one made
     // `--max-requests 1` wait a full interval before noticing it was finished — harmless in a
     // long run, but it makes the script untestable and a cron invocation hang for nothing.
-    const willContinue = !stopping && settled < maxRequests && consecutiveFailures === 0;
+    const willContinue =
+      !stopping && (forever || settled < maxRequests) && consecutiveFailures === 0;
     if (willContinue) await sleep(intervalS * 1000);
   }
 
+  await spend.close();
   const end = await readWallet(payer.address, "31566704");
   heading("done");
   info(`settled    ${settled} requests`);

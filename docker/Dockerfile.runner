@@ -1,0 +1,65 @@
+# syntax=docker/dockerfile:1.7
+#
+# x402 Mesh Inference — sustained-volume runner.
+#
+# Build from the repository root:
+#   docker build -f docker/Dockerfile.runner -t x402-mesh-runner .
+#
+# Unlike the gateway image this ships TypeScript and runs it through tsx, because the payload
+# is a script under scripts/ rather than a compiled workspace package. The tradeoff is a
+# larger image for something that makes one HTTP request every few minutes — worth it to keep
+# the runner and the script it runs literally the same file, so what is reviewed is what runs.
+
+ARG NODE_VERSION=22-alpine
+
+FROM node:${NODE_VERSION} AS base
+ENV NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+WORKDIR /app
+
+# ---------------------------------------------------------------------------------------------
+# deps — full workspace tree, cached on manifests alone
+# ---------------------------------------------------------------------------------------------
+FROM base AS deps
+COPY package.json package-lock.json ./
+COPY packages/shared/package.json packages/shared/package.json
+COPY packages/registry/package.json packages/registry/package.json
+COPY packages/gateway/package.json packages/gateway/package.json
+COPY packages/node-daemon/package.json packages/node-daemon/package.json
+RUN --mount=type=cache,target=/root/.npm npm ci
+
+# ---------------------------------------------------------------------------------------------
+# runtime
+# ---------------------------------------------------------------------------------------------
+FROM base AS runtime
+ENV NODE_ENV=production
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/packages/shared/node_modules ./packages/shared/node_modules
+COPY package.json tsconfig.base.json ./
+COPY packages ./packages
+COPY scripts ./scripts
+
+# Never root: this process holds a funded wallet key in its environment.
+USER node
+
+# The wallet key arrives as AVM_PRIVATE_KEY and is written to the file the script reads. It is
+# created in the container at start and never baked into a layer, so the image itself carries
+# no secret and can be rebuilt or pushed without leaking one.
+#
+# Every spend guard is passed explicitly rather than relying on a default. --daily-budget is
+# the load-bearing one: it is enforced in Redis, so a restart cannot hand this process a fresh
+# allowance. --forever refuses to start without it.
+ENTRYPOINT ["/bin/sh", "-c", "\
+  mkdir -p /tmp/w && \
+  printf 'AVM_PRIVATE_KEY=%s\\n' \"$AVM_PRIVATE_KEY\" > /tmp/w/payer.env && \
+  exec npx tsx scripts/sustain.ts \
+    --wallet /tmp/w/payer.env \
+    --url \"${RUNNER_URL:?RUNNER_URL is required}\" \
+    --interval \"${RUNNER_INTERVAL_S:-900}\" \
+    --daily-budget \"${RUNNER_DAILY_BUDGET_USDC:?RUNNER_DAILY_BUDGET_USDC is required}\" \
+    --floor \"${RUNNER_FLOOR_USDC:-0.002}\" \
+    --forever \
+    --i-understand-this-spends-real-money \
+"]
