@@ -31,7 +31,6 @@
     "optin": "tsx scripts/optin.ts",
     "mnemonic": "tsx scripts/mnemonic.ts",
     "test:flake": "./scripts/flake-hunt.sh",
-    "sustain": "tsx scripts/sustain.ts",
     "rank": "tsx scripts/rank.ts"
   },
   "devDependencies": {
