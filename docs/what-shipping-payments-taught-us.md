@@ -1,9 +1,14 @@
 # Nine ways a payment system lies to you
 
-We built [x402 Mesh Inference](https://github.com/balogvn/x402-mesh-inference) — a pay-per-prompt
-AI marketplace where an agent calls an OpenAI-compatible endpoint with no account and no API key,
-pays inline in USDC on Algorand, and the gateway pays the GPU operator who served it. Two on-chain
-money legs per request.
+We built [x402 Mesh Inference](https://github.com/balogvn/x402-mesh-inference) — an agent calls
+an OpenAI-compatible endpoint with no account and no API key, pays inline in USDC on Algorand,
+and the gateway pays the GPU operator who served it. Two on-chain money legs per request.
+
+We described it as an AI inference marketplace for two days before noticing that inference was
+the least interesting part. The difficult thing was splitting a micropayment between a platform
+and a supplier who hold no account with each other, and amortizing the transaction fee so the
+split is possible at all. Every failure below is a failure of _that_, not of serving a model —
+which is why they generalise to anything paying many suppliers a little at a time.
 
 It works. It settles on MainNet. It leads the x402 Global Challenge leaderboard.
 

@@ -1,9 +1,18 @@
 # x402 Mesh Inference
 
-**A decentralized pay-per-prompt AI inference marketplace.** Independent GPU operators register
-their hardware with a gateway, an autonomous agent calls an ordinary OpenAI-compatible
-`POST /v1/chat/completions` endpoint with no account and no API key, and the gateway answers
-`402 Payment Required` with a machine-readable x402 challenge. The agent pays inline, in USDC
+**Settlement infrastructure for pay-per-use APIs, with an AI inference marketplace on top.**
+
+The hard part here is not serving a model — that is a commodity. It is splitting a micropayment
+between a platform and a supplier, on-chain, where neither holds an account with the other, and
+amortizing the transaction fee so the split is economically possible at all. A flat per-payout
+fee is the structural reason micropayment marketplaces do not exist: below a certain size, paying
+your supplier costs more than the payment is worth. The 1,795 lines that solve that make no
+mention of inference. See [docs/positioning.md](docs/positioning.md).
+
+The demo on top is a marketplace: independent GPU operators register their hardware with a
+gateway, an autonomous agent calls an ordinary OpenAI-compatible `POST /v1/chat/completions`
+endpoint with no account and no API key, and the gateway answers `402 Payment Required` with a
+machine-readable x402 challenge. The agent pays inline, in USDC
 settled on **Algorand** through the [GoPlausible](https://facilitator.goplausible.xyz) x402
 facilitator, which sponsors the ALGO fee so the payment is gasless for the payer. The gateway
 routes the prompt to the healthiest node advertising that model, streams the completion back
@@ -27,6 +36,7 @@ the invariant `inbound − payout = margin` asserted before any funds move.
 
 ## Contents
 
+- [What this actually is](docs/positioning.md)
 - [How it works](#how-it-works)
 - [The money, step by step](#the-money-step-by-step)
 - [Integrate in 60 seconds](#integrate-in-60-seconds)

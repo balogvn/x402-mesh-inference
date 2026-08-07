@@ -148,6 +148,10 @@ curl -s "https://mainnet-idx.algonode.cloud/v2/transactions/JDW6Y76INRUKGQRT7N5A
 > An agent paid for compute with no account, no key, and no human. The operator who served it was
 > paid automatically, on chain, in the same minute.
 >
+> The inference is a demo. What is underneath is a settlement rail — many small payments, many
+> suppliers, no account relationship, and a transaction fee bigger than the payment. That is the
+> problem that stops micropayment marketplaces existing, and it is the part worth reusing.
+>
 > It is live on Algorand MainNet, it is Apache-2.0, and the write-up documents the nine ways this
 > system told us it was fine while it was not — including a security hole we shipped and found an
 > hour later. That is in the repo too.
