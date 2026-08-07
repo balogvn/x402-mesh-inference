@@ -30,7 +30,9 @@
     "preflight": "tsx scripts/preflight.ts",
     "optin": "tsx scripts/optin.ts",
     "mnemonic": "tsx scripts/mnemonic.ts",
-    "test:flake": "./scripts/flake-hunt.sh"
+    "test:flake": "./scripts/flake-hunt.sh",
+    "sustain": "tsx scripts/sustain.ts",
+    "rank": "tsx scripts/rank.ts"
   },
   "devDependencies": {
     "@eslint/js": "^9.24.0",
