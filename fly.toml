@@ -67,12 +67,25 @@ kill_timeout = "35s"
   # economics instead of on fear.
   #
   # Past ~$0.25 the saving stops mattering: the fee is already a rounding error against the
-  # transfer, and every further step buys less while making operators wait longer. The
-  # 15-minute ceiling means an operator is paid at least four times an hour even if the mesh
-  # is nearly idle, which is also what keeps /v1/settlements looking alive to anyone watching.
-  # Whatever is owed in the meantime is visible at /v1/payouts/pending.
+  # transfer, and every further step buys less while making operators wait longer. Whatever is
+  # owed in the meantime is visible at /v1/payouts/pending.
+  #
+  # The 6-hour ceiling is the one that matters at low volume, and it was 15 minutes until this
+  # was measured. Batching only batches when several requests accrue before a flush; at a
+  # steady low rate the DEADLINE fires long before the $0.25 threshold, so every flush carried
+  # one or two requests and paid a full fee for each. The effect was stark — a 5-minute and a
+  # 15-minute request interval cost identical fees despite 3x the volume, because both were
+  # capped at 96 flushes a day by the deadline rather than by the threshold.
+  #
+  # At 96 flushes/day the gateway burns 0.096 ALGO/day and drains a 0.4 ALGO balance in four
+  # days. At 6 hours it is 0.004/day: roughly 25x cheaper, and the difference between a run
+  # that survives to the October measurement window and one that quietly stops paying.
+  #
+  # The cost is operator patience: an operator may now wait up to 6 hours rather than 15
+  # minutes. That is the right trade for a mesh whose operators are all currently ours, and
+  # the wrong one for a mesh with third parties in it — revisit this when there are.
   MESH_PAYOUT_BATCH_MIN_USDC = "0.25"
-  MESH_PAYOUT_BATCH_MAX_DELAY_MS = "900000"
+  MESH_PAYOUT_BATCH_MAX_DELAY_MS = "21600000"
 
   # A publicly reachable gateway must not accept node endpoints on private address space —
   # that is the SSRF guard. Leave this false here; it is only relaxed for local development.
