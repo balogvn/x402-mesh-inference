@@ -158,6 +158,78 @@ describe("accruals are written down before they are owed for long", () => {
 
     expect(service.getRecord("r1")?.status).toBe("failed");
     expect(store.batches.size, "a debt the gateway failed to pay must outlive the process").toBe(1);
+
+    // Durable AND visible. Surviving in Redis is not enough on its own: the debt also has to
+    // show up where anyone looks for it, or it is invisible in exactly the case that matters.
+    const pending = service.getPendingPayouts();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ state: "stuck", operatorAddress: OPERATOR });
+    expect(pending[0]?.lastError).toBeTruthy();
+  });
+});
+
+describe("a batch that can never be paid stays visible", () => {
+  it("reports a batch recovered from a dead process, under its original id and age", async () => {
+    // The live case this exists for: a MainNet batch whose operator address is not opted in to
+    // USDC, so the payout can never succeed. Every boot recovers it, retries, and fails — and
+    // before this it vanished from /v1/payouts/pending the instant recovery carved it off, so
+    // 0.0153 USDC sat genuinely owed while the endpoint reported zero.
+    //
+    // Seeded directly, the way the real Redis row looks.
+    const store = new FakeAccrualStore();
+    store.batches.set("msgm704g-2", {
+      operatorAddress: OPERATOR,
+      firstAt: 1_000,
+      batchId: "msgm704g-2",
+      records: [
+        {
+          requestId: "r1",
+          nodeId: "demo-node-01",
+          payerAddress: OPERATOR,
+          operatorAddress: OPERATOR,
+          inboundAtomic: "2000",
+          payoutAtomic: "1700",
+          marginAtomic: "300",
+          inboundTxId: "IN-r1",
+          payoutTxId: null,
+          status: "accrued",
+          createdAt: 1_000,
+          settledAt: null,
+        },
+      ],
+    });
+
+    // A payer that always fails, standing in for a receiver not opted in to the asset.
+    const payer = new StubPayer(99);
+    const service = new DoubleSettlementService({
+      config: makeConfig({ payoutBatchMinUsdc: "1.00", payoutBatchMaxDelayMs: 900_000 }),
+      payer,
+      logger: silentLogger,
+      now: makeClock().now,
+      sleep: () => Promise.resolve(),
+      random: () => 0.5,
+      accrualStore: store,
+    });
+
+    await service.recoverAccruals();
+    await service.whenIdle();
+
+    const pending = service.getPendingPayouts();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({
+      state: "stuck",
+      operatorAddress: OPERATOR,
+      owedAtomic: PAYOUT_PER_REQUEST.toString(10),
+      // The SAME id the dead process used. A fresh id would mean a fresh Algorand lease, which
+      // is the double-pay bug; asserting it here is a cheap extra place that keeps watching.
+      batchId: "msgm704g-2",
+      // The ORIGINAL settlement time, not the recovery time — a debt recovered at boot is as
+      // old as the request that created it, and resetting it hides how long it has been stuck.
+      oldestAt: 1_000,
+    });
+    expect(pending[0]?.lastError).toBeTruthy();
+    // Recovery must not have discharged the durable debt either.
+    expect(store.batches.size).toBe(1);
   });
 });
 

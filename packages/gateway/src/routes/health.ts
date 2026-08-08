@@ -78,6 +78,12 @@ export function createHealthRouter(deps: HealthRouteDeps): Router {
   // be able to see what the gateway owes them without asking anyone. With batching enabled
   // this is the difference between "not paid yet" and "not going to be paid", and only the
   // gateway knows which.
+  //
+  // That claim was false until the `state` field existed. This reported only still-accruing
+  // balances, which a batch leaves the moment it is carved off — so a payout that could never
+  // succeed made the debt disappear from the one endpoint meant to report it. A real MainNet
+  // batch sat invisible that way: 0.0153 USDC owed to an operator not opted in to USDC, with
+  // this endpoint answering `totalOwed: 0`.
   router.get("/v1/payouts/pending", (_req, res) => {
     const pending = deps.settlement.getPendingPayouts();
     const owed = pending.reduce((sum, p) => sum + BigInt(p.owedAtomic), 0n);
@@ -92,7 +98,10 @@ export function createHealthRouter(deps: HealthRouteDeps): Router {
             },
       asset: usdcAssetId(deps.config.network),
       decimals: 6,
-      operators: pending.length,
+      // Distinct operators, not entries: one operator can appear twice, once for a fresh
+      // accrual and once for a batch that is stuck.
+      operators: new Set(pending.map((p) => p.operatorAddress)).size,
+      stuck: pending.filter((p) => p.state === "stuck").length,
       totalOwedAtomic: owed.toString(10),
       totalOwedUsdc: atomicToUsdc(owed),
       pending,

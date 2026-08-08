@@ -481,9 +481,16 @@ paths:
         flat 0.001 ALGO transaction fee is paid once per batch rather than once per request.
 
         Free and unauthenticated, for the same reason the settlement ledger is: an operator
-        must be able to see what they are owed without asking anyone. Accrued balances are
-        held in the gateway wallet and tracked in memory — `deadlineAt` bounds how long any
-        balance can sit here.
+        must be able to see what they are owed without asking anyone.
+
+        Reports money in three states, via `state`: still `accruing`, already handed to a
+        payout and `paying`, or `stuck` after a payout attempt failed. A `stuck` entry is still
+        owed and is retried on the next boot, but it will not clear on its own if the cause is
+        structural — a receiver not opted in to the USDC asset, for example.
+
+        Entries are per accrual and per batch, not merged per operator: one operator can hold a
+        fresh accrual and a stuck batch at once, and `operators` counts distinct addresses
+        rather than entries.
       responses:
         "200":
           description: Currently accrued balances, oldest first.
@@ -491,7 +498,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [batching, asset, decimals, operators, totalOwedAtomic, pending]
+                required: [batching, asset, decimals, operators, stuck, totalOwedAtomic, pending]
                 properties:
                   batching:
                     type: object
@@ -508,7 +515,14 @@ paths:
                   decimals: { type: integer, example: 6 }
                   operators:
                     type: integer
-                    description: How many operators currently have an unpaid balance.
+                    description: |
+                      How many distinct operators currently have an unpaid balance. Not the
+                      length of `pending`, which may list one operator twice.
+                  stuck:
+                    type: integer
+                    description: |
+                      Entries whose last payout attempt failed. Non-zero means money is owed
+                      that will not clear without intervention.
                   totalOwedAtomic:
                     type: string
                     description: Sum of every unpaid balance, in atomic USDC units.
@@ -517,7 +531,7 @@ paths:
                     type: array
                     items:
                       type: object
-                      required: [operatorAddress, owedAtomic, requests, oldestAt, deadlineAt]
+                      required: [operatorAddress, owedAtomic, requests, oldestAt, state]
                       properties:
                         operatorAddress: { type: string }
                         owedAtomic:
@@ -531,9 +545,32 @@ paths:
                         oldestAt:
                           type: integer
                           description: Unix ms when the oldest request in this accrual settled.
+                        state:
+                          type: string
+                          enum: [accruing, paying, stuck]
+                          description: |
+                            Where this money is. `stuck` means a payout was attempted and
+                            failed; the debt stands and is retried, but something is wrong.
                         deadlineAt:
                           type: integer
-                          description: Unix ms by which this balance is paid regardless of size.
+                          description: |
+                            Unix ms by which this balance is paid regardless of size. Present
+                            only while `accruing` — once carved off, no deadline applies.
+                        batchId:
+                          type: string
+                          description: |
+                            Present once carved off. The id the payout carries as its Algorand
+                            lease and note, reused verbatim on every retry so a payout that
+                            already landed cannot be paid twice.
+                        attempts:
+                          type: integer
+                          description: Payout attempts against this batch in the current process.
+                        lastError:
+                          type: string
+                          description: Why the last attempt failed. Present only when `stuck`.
+                        lastAttemptAt:
+                          type: integer
+                          description: Unix ms of the last failed attempt. Present only when `stuck`.
 
   /v1/pricing:
     get:

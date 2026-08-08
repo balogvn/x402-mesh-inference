@@ -307,7 +307,123 @@ describe("failure handling covers the whole batch", () => {
       expect(service.getRecord(id)?.status).toBe("failed");
       expect(service.getRecord(id)?.error).toBeTruthy();
     }
+
+    // This assertion used to read `toHaveLength(0)`, which encoded the bug as correct: a batch
+    // left `accruals` the moment it was carved off, so a payout that could never succeed made
+    // the debt vanish from the endpoint whose whole job is reporting it. A real MainNet batch
+    // sat invisible this way — 0.0153 USDC owed, `/v1/payouts/pending` reporting zero.
+    //
+    // The money is still owed after a failed payout, so it must still be listed, and it must
+    // be distinguishable from a payout that is merely in flight.
+    const pending = service.getPendingPayouts();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({
+      operatorAddress: OPERATOR_A,
+      owedAtomic: (PAYOUT_PER_REQUEST * 3n).toString(10),
+      requests: 3,
+      state: "stuck",
+    });
+    expect(pending[0]?.batchId).toBeTruthy();
+    expect(pending[0]?.lastError).toBeTruthy();
+    expect(pending[0]?.attempts).toBeGreaterThan(0);
+  });
+
+  it("reports a batch as `paying` while its payout is unresolved", async () => {
+    // Between carve-off and confirmation the money is neither accruing nor paid. It is still
+    // owed, so it must appear — and it must NOT be labelled stuck, which would cry wolf on
+    // every in-flight payout.
+    //
+    // The payout is held open deliberately, so `whenIdle()` must NOT be awaited after the
+    // flush-triggering request: doing so waits on the very payout being held, and deadlocks.
+    let release: ((tx: { txId: string }) => void) | undefined;
+    const payer = {
+      pay: () => new Promise<{ txId: string }>((resolve) => (release = resolve)),
+      findLandedPayout: () => Promise.resolve(undefined),
+    };
+    const clock = makeClock();
+    const service = new DoubleSettlementService({
+      config: makeConfig({ payoutBatchMinUsdc: "0.005" }),
+      payer: payer as never,
+      logger: silentLogger,
+      now: clock.now,
+      sleep: () => Promise.resolve(),
+      random: () => 0.5,
+    });
+
+    await settle(service, "r1", OPERATOR_A);
+    await settle(service, "r2", OPERATOR_A);
+
+    // Third request crosses the threshold and carves off the batch. Fire it without awaiting.
+    service.recordRouting("r3", "node-x", OPERATOR_A);
+    service.settleInbound({
+      requestId: "r3",
+      payerAddress: OPERATOR_A,
+      inboundTxId: "INBOUND-r3",
+      inboundAtomic: 2000n,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const inFlight = service.getPendingPayouts();
+    expect(inFlight).toHaveLength(1);
+    expect(inFlight[0]).toMatchObject({
+      state: "paying",
+      owedAtomic: (PAYOUT_PER_REQUEST * 3n).toString(10),
+      attempts: 0,
+    });
+    expect(inFlight[0]?.lastError).toBeUndefined();
+
+    release?.({ txId: "TX_LATE" });
+    await service.whenIdle();
+    // Once it settles the liability is discharged and must leave the list.
     expect(service.getPendingPayouts()).toHaveLength(0);
+  });
+
+  it("does not leak a settled batch when there is no accrual store", async () => {
+    // The mirror is cleared in finalizeSettled rather than inside releaseBatch precisely
+    // because releaseBatch early-returns without a store. Putting it there would make a
+    // store-less gateway report every settled batch as owed forever.
+    const payer = new StubPayer(0);
+    const clock = makeClock();
+    const service = new DoubleSettlementService({
+      config: makeConfig({ payoutBatchMinUsdc: "0.005" }),
+      payer,
+      logger: silentLogger,
+      now: clock.now,
+      sleep: () => Promise.resolve(),
+      random: () => 0.5,
+    });
+
+    for (const id of ["r1", "r2", "r3"]) await settle(service, id, OPERATOR_A);
+    await service.whenIdle();
+
+    expect(payer.payments).toHaveLength(1);
+    expect(service.getPendingPayouts()).toHaveLength(0);
+  });
+
+  it("keeps an accrual and a stuck batch as separate entries for one operator", async () => {
+    // Collapsing them per operator would hide which batchId is wedged, which is the only
+    // actionable part of the report.
+    const payer = new StubPayer(99);
+    const clock = makeClock();
+    const service = new DoubleSettlementService({
+      config: makeConfig({ payoutBatchMinUsdc: "0.005" }),
+      payer,
+      logger: silentLogger,
+      now: clock.now,
+      sleep: () => Promise.resolve(),
+      random: () => 0.5,
+    });
+
+    for (const id of ["r1", "r2", "r3"]) await settle(service, id, OPERATOR_A);
+    await settle(service, "r4", OPERATOR_A); // starts a fresh accrual behind the stuck batch
+
+    const pending = service.getPendingPayouts();
+    expect(pending).toHaveLength(2);
+    expect(pending.map((p) => p.state).sort()).toEqual(["accruing", "stuck"]);
+    expect(new Set(pending.map((p) => p.operatorAddress))).toEqual(new Set([OPERATOR_A]));
+    // Every atomic unit owed is still reported, across both entries.
+    const total = pending.reduce((sum, p) => sum + BigInt(p.owedAtomic), 0n);
+    expect(total).toBe(PAYOUT_PER_REQUEST * 4n);
   });
 
   it("never accrues a zero payout", async () => {

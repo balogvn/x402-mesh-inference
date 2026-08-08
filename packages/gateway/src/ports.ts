@@ -124,17 +124,40 @@ export interface InboundSettlement {
   inboundAtomic: Atomic;
 }
 
-/** One operator's unpaid balance, as reported by `GET /v1/payouts/pending`. */
+/**
+ * One unpaid liability, as reported by `GET /v1/payouts/pending`.
+ *
+ * Covers both money still accruing toward a payout and money already handed to a payout that
+ * has not discharged it. The second kind used to be omitted entirely, so a batch whose payout
+ * kept failing was invisible on the one endpoint that exists to answer "what am I owed".
+ */
 export interface PendingPayout {
   operatorAddress: string;
   /** Sum owed, in atomic USDC units, as a decimal string. */
   owedAtomic: string;
   /** How many settled requests make up that sum. */
   requests: number;
-  /** When the oldest request in this accrual settled. */
+  /** When the oldest request in this liability settled. */
   oldestAt: number;
-  /** When this accrual will be paid out even if it never reaches the threshold. */
-  deadlineAt: number;
+  /**
+   * Where this money is in its lifecycle.
+   *
+   * - `accruing` — still collecting; will flush on threshold or deadline.
+   * - `paying`   — handed to a payout, not yet confirmed.
+   * - `stuck`    — a payout attempt failed. Still owed, and retried on the next boot, but
+   *   something is wrong: a receiver not opted in to USDC never resolves on its own.
+   */
+  state: "accruing" | "paying" | "stuck";
+  /** Set only while `accruing`: when it pays out even if it never reaches the threshold. */
+  deadlineAt?: number;
+  /** Set once carved off. The id the payout carries as its Algorand lease and note. */
+  batchId?: string;
+  /** Payout attempts made against this batch in the current process. */
+  attempts?: number;
+  /** Why the last attempt failed. Present only when `stuck`. */
+  lastError?: string;
+  /** When the last attempt failed. Present only when `stuck`. */
+  lastAttemptAt?: number;
 }
 
 /** Orchestrates the second settlement leg and owns the audit ledger. */

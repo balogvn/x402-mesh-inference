@@ -115,6 +115,25 @@ interface RoutingNote {
   at: number;
 }
 
+/**
+ * A batch that has been carved off an accrual and is in flight or stuck.
+ *
+ * Mirrors a durable `accrual:batch:<batchId>` row for reporting only. `attempts` and
+ * `lastError` are what separate "not paid yet" from "not going to be paid" — the distinction
+ * `/v1/payouts/pending` claims to make and previously could not.
+ */
+interface BatchLiability {
+  batchId: string;
+  operatorAddress: string;
+  owedAtomic: bigint;
+  requests: number;
+  /** When the oldest request in the batch settled. Carried over from the accrual. */
+  oldestAt: number;
+  attempts: number;
+  lastError: string | null;
+  lastAttemptAt: number | null;
+}
+
 /** One operator's accrued-but-unpaid balance. */
 interface Accrual {
   operatorAddress: string;
@@ -207,6 +226,25 @@ export class DoubleSettlementService implements SettlementServicePort {
 
   /** Accrued-but-unpaid balances, keyed by operator address. */
   private readonly accruals = new Map<string, Accrual>();
+
+  /**
+   * Batches that have left `accruals` and are being paid, or have failed and are still owed.
+   *
+   * Read ONLY by {@link getPendingPayouts}. Nothing in the payout path consults it, so it
+   * cannot influence what is paid — it exists solely so that money we owe is visible.
+   *
+   * It exists because `/v1/payouts/pending` reported only `accruals`, which a batch leaves the
+   * instant it is carved off. A batch whose payout keeps failing therefore vanished from the
+   * one endpoint whose stated purpose is telling an operator what they are owed — and the
+   * failing case is precisely the one worth seeing. A real MainNet batch sat invisible this
+   * way: 0.0153 USDC owed, with the endpoint reporting `totalOwed: 0`.
+   *
+   * Redis remains authoritative. This mirror is per-process and can only ever be a SUBSET of
+   * the durable rows, because entries are added where `putBatch` is enqueued and removed where
+   * `removeBatch` is. Its failure direction is therefore under-reporting — the status quo —
+   * never inventing a liability that is not durably recorded.
+   */
+  private readonly batchLiabilities = new Map<string, BatchLiability>();
 
   /** Monotonic suffix making each batch id unique within a process. */
   private batchSeq = 0;
@@ -424,6 +462,7 @@ export class DoubleSettlementService implements SettlementServicePort {
       if (payable.length === 0) {
         // Nothing left to pay: either empty, or entirely covered by a batch handled above.
         // Drop the stale row so the next boot does not reconsider it.
+        if (typeof stored.batchId === "string") this.batchLiabilities.delete(stored.batchId);
         this.dropRecovered(stored);
         continue;
       }
@@ -438,6 +477,7 @@ export class DoubleSettlementService implements SettlementServicePort {
 
       const summed = payable.reduce((acc, r) => acc + BigInt(r.payoutAtomic), 0n);
       if (summed === 0n) {
+        if (typeof stored.batchId === "string") this.batchLiabilities.delete(stored.batchId);
         this.dropRecovered(stored);
         continue;
       }
@@ -457,6 +497,19 @@ export class DoubleSettlementService implements SettlementServicePort {
         },
         "paying out a recovered accrual",
       );
+
+      this.batchLiabilities.set(batchId, {
+        batchId,
+        operatorAddress: stored.operatorAddress,
+        owedAtomic: summed,
+        requests: payable.length,
+        // The ORIGINAL settlement time, not now: a debt recovered at boot is as old as the
+        // request that created it, and resetting it would make a long-stuck batch look fresh.
+        oldestAt: stored.firstAt,
+        attempts: 0,
+        lastError: null,
+        lastAttemptAt: null,
+      });
 
       // Store it as a batch under the id we are about to pay with, so a crash during recovery
       // is itself recoverable. Chained on the OPERATOR, like every other durable write, so it
@@ -519,17 +572,44 @@ export class DoubleSettlementService implements SettlementServicePort {
     await this.whenIdle();
   }
 
-  /** @inheritdoc */
+  /**
+   * @inheritdoc
+   *
+   * Reports BOTH still-accruing balances and batches already carved off but not yet paid.
+   *
+   * It used to report only the former, which meant a batch disappeared from this list the
+   * instant it was handed to a payout — including when that payout could never succeed. The
+   * endpoint answering "what am I owed" went silent on precisely the debts worth asking about.
+   *
+   * One entry per accrual and one per batch, deliberately not merged by operator: an operator
+   * can simultaneously have a fresh accrual and a stuck batch, and collapsing them would hide
+   * which `batchId` is wedged, which is the only actionable part.
+   */
   getPendingPayouts(): PendingPayout[] {
-    return [...this.accruals.values()]
-      .map((a) => ({
-        operatorAddress: a.operatorAddress,
-        owedAtomic: a.totalAtomic.toString(10),
-        requests: a.records.length,
-        oldestAt: a.firstAt,
-        deadlineAt: a.firstAt + this.config.payoutBatchMaxDelayMs,
-      }))
-      .sort((x, y) => x.oldestAt - y.oldestAt);
+    const accruing: PendingPayout[] = [...this.accruals.values()].map((a) => ({
+      operatorAddress: a.operatorAddress,
+      owedAtomic: a.totalAtomic.toString(10),
+      requests: a.records.length,
+      oldestAt: a.firstAt,
+      state: "accruing" as const,
+      deadlineAt: a.firstAt + this.config.payoutBatchMaxDelayMs,
+    }));
+
+    const batched: PendingPayout[] = [...this.batchLiabilities.values()].map((b) => ({
+      operatorAddress: b.operatorAddress,
+      owedAtomic: b.owedAtomic.toString(10),
+      requests: b.requests,
+      oldestAt: b.oldestAt,
+      // A batch that has failed at least once is not merely late — something is wrong with it,
+      // and saying so is the whole point of this list.
+      state: b.lastError === null ? ("paying" as const) : ("stuck" as const),
+      batchId: b.batchId,
+      attempts: b.attempts,
+      ...(b.lastError === null ? {} : { lastError: b.lastError }),
+      ...(b.lastAttemptAt === null ? {} : { lastAttemptAt: b.lastAttemptAt }),
+    }));
+
+    return [...accruing, ...batched].sort((x, y) => x.oldestAt - y.oldestAt);
   }
 
   /** @inheritdoc */
@@ -697,6 +777,17 @@ export class DoubleSettlementService implements SettlementServicePort {
       },
       "flushing operator payout batch",
     );
+
+    this.batchLiabilities.set(batchId, {
+      batchId,
+      operatorAddress,
+      owedAtomic: summed,
+      requests: accrual.records.length,
+      oldestAt: accrual.firstAt,
+      attempts: 0,
+      lastError: null,
+      lastAttemptAt: null,
+    });
 
     // Promote open -> batch BEFORE paying. The stored batchId is what a restart reuses, so
     // the retry carries the same Algorand lease and the same note as an attempt that may
@@ -958,6 +1049,10 @@ export class DoubleSettlementService implements SettlementServicePort {
     txId: string | null,
     batchId: string | null,
   ): void {
+    // Before releaseBatch, and unconditionally: releaseBatch early-returns without an accrual
+    // store, so putting this inside it would leave a store-less service reporting settled
+    // batches as owed forever.
+    if (batchId !== null) this.batchLiabilities.delete(batchId);
     this.releaseBatch(batchId, records[0]?.operatorAddress ?? "");
     const settledAt = this.now();
     for (const record of records) {
@@ -981,6 +1076,17 @@ export class DoubleSettlementService implements SettlementServicePort {
     // "the ledger" — but the ledger is in memory and capped at maxLedgerEntries, so deleting
     // here erased the only durable trace of a real liability. Keeping it means the next boot
     // retries, which is correct: the debt outlives the process that failed to settle it.
+    //
+    // The mirror entry is annotated rather than removed, for the same reason: it is the only
+    // thing that makes an undischargeable debt visible at /v1/payouts/pending.
+    if (batchId !== null) {
+      const liability = this.batchLiabilities.get(batchId);
+      if (liability !== undefined) {
+        liability.attempts += 1;
+        liability.lastError = reason.slice(0, 256);
+        liability.lastAttemptAt = this.now();
+      }
+    }
     const settledAt = this.now();
     for (const record of records) {
       this.update(record.requestId, {
