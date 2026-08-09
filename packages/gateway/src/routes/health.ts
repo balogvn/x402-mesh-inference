@@ -1,4 +1,5 @@
 import type { GatewayConfig } from "@x402-mesh/shared";
+import { unroutableReason, type UnroutableReason } from "@x402-mesh/registry";
 import { atomicToUsdc, computeSplit, usdcAssetId, usdcToAtomic } from "@x402-mesh/shared";
 import { pricingTable } from "../x402/routes.js";
 import { Router } from "express";
@@ -27,6 +28,14 @@ const PROBE_TIMEOUT_MS = 3_000;
 interface CheckResult {
   ok: boolean;
   detail?: string;
+  /**
+   * Why nodes were excluded from capacity, by reason.
+   *
+   * Present only on the store check, and only when something was excluded. A bare count tells
+   * an operator that capacity is short; the reason tells them whether to restart a node or fix
+   * a network setting, which are very different afternoons.
+   */
+  rejected?: Partial<Record<UnroutableReason, number>>;
 }
 
 /** Collaborators the health routes need. */
@@ -116,12 +125,29 @@ async function handleReady(deps: HealthRouteDeps, res: Response): Promise<void> 
     runCheck(deps.probeFacilitator ?? (() => defaultFacilitatorProbe(deps.config))),
     runCheck(async () => {
       const nodes = await deps.store.list();
-      const routable = nodes.filter(
-        (n) => n.health.healthy && (n.usdcOptedIn || !deps.config.requireUsdcOptIn),
-      );
+      // The SAME predicate the selector routes on, imported rather than reimplemented. This
+      // check previously applied only `healthy && optedIn` — no network test, no staleness
+      // test — and so reported "2/2 nodes routable" on a MainNet gateway whose second node was
+      // a TestNet leftover the selector refused to route to. Real capacity was 1/2.
+      //
+      // Two implementations of "routable" is how that happened; there is now one.
+      const options = {
+        network: deps.config.network,
+        staleAfterMs: deps.config.nodeStaleAfterMs,
+      };
+      const rejected: Partial<Record<UnroutableReason, number>> = {};
+      let routable = 0;
+      for (const node of nodes) {
+        const reason = unroutableReason(node, options);
+        if (reason === null) routable += 1;
+        else rejected[reason] = (rejected[reason] ?? 0) + 1;
+      }
       return {
         ok: true,
-        detail: `${routable.length}/${nodes.length} nodes routable`,
+        // The reasons, not just the shortfall: "1/2 routable" sends an operator looking for a
+        // dead node, when the answer may be that it is healthy and on the wrong chain.
+        detail: `${routable}/${nodes.length} nodes routable`,
+        ...(Object.keys(rejected).length > 0 ? { rejected } : {}),
       };
     }),
     deps.probeWallet === undefined

@@ -29,6 +29,8 @@ export type {
 } from "./store/index.js";
 
 export { DEFAULT_WEIGHTS, NodeSelector, nodePriceAtomic, scoreNode } from "./selector/index.js";
+export { isRoutable, unroutableReason } from "./selector/routable.js";
+export type { RoutabilityOptions, UnroutableReason } from "./selector/routable.js";
 export type {
   NodeSelectorOptions,
   ScoreContext,
