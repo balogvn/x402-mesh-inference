@@ -312,6 +312,29 @@ export function attachSettlementHook(
   settlement: SettlementServicePort,
   logger: Logger,
 ): void {
+  // WHY THERE IS NO "paid but not served" GUARD HERE.
+  //
+  // The obvious worry is that the gateway takes payment and then fails to route, leaving a payer
+  // charged for nothing — an inbound settlement is an on-chain transfer, so there is no refund
+  // path and it could only be prevented, never corrected.
+  //
+  // `@x402/express` already prevents it. The middleware buffers the response, runs the handler,
+  // waits for the response to end, and then:
+  //
+  //     if (res.statusCode >= 400) { await cancellationDispatcher.cancel(...); return; }
+  //     ...
+  //     const settleResult = await httpServer.processSettlement(...)
+  //
+  // `processSettlement` has exactly one call site and it sits below that guard, so a `503
+  // no_capacity` from the router cancels the payment rather than settling it. A handler that
+  // throws is cancelled too, under `reason: "handler_threw"`.
+  //
+  // This was investigated after being wrongly filed as a live bug. It is recorded here rather
+  // than in a test because pinning it needs a valid AVM payment payload — a real signed Algorand
+  // transaction group matching the declared requirement — which cannot be stubbed cheaply. So the
+  // guarantee comes from a DEPENDENCY and is not covered by our suite: if `@x402/express` ever
+  // moves settlement above that status check, nothing here will fail. Re-read the middleware on
+  // any major upgrade of it.
   resourceServer.onAfterSettle(async (context) => {
     try {
       const headers = responseHeadersOf(context.transportContext);
