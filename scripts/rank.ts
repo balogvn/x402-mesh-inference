@@ -19,7 +19,20 @@ import {
   wantsHelp,
 } from "./lib/cli.js";
 
-const CATALOG = "https://facilitator.goplausible.xyz/discovery/resources?limit=100";
+/**
+ * The catalog, requested whole.
+ *
+ * `limit` was 100, and that was silently wrong rather than merely incomplete. The endpoint does
+ * NOT return the top 100 by settle count — it returns an arbitrary 100-entry slice, so both the
+ * reported rank and the field size were fiction. It read "rank 4 of 54" when the truth was rank
+ * 14 of 831, and after the slice shifted it read "no tagged entry", which looked exactly like
+ * being dropped from the leaderboard.
+ *
+ * A truncated leaderboard is worse than no leaderboard: it produces a confident wrong answer.
+ */
+const CATALOG_BASE = "https://facilitator.goplausible.xyz/discovery/resources";
+const CATALOG_LIMIT = 5000;
+const CATALOG = `${CATALOG_BASE}?limit=${CATALOG_LIMIT}`;
 const CHALLENGE_TAG = "x402-global-challenge";
 const USDC_MAINNET = "31566704";
 
@@ -54,20 +67,49 @@ async function main(): Promise<void> {
   const top = Number(args.options.get("top") ?? "8");
   const walletPath = args.options.get("wallet") ?? ".wallets/client-mainnet.env";
 
-  const response = await fetch(CATALOG, { signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS) });
+  // The full catalog is over a thousand entries; the default probe timeout is sized for a health
+  // check, not a bulk fetch, and using it here made the whole ranking fail rather than truncate.
+  const response = await fetch(CATALOG, { signal: AbortSignal.timeout(60_000) });
   if (!response.ok) throw new Error(`catalog fetch failed: HTTP ${response.status}`);
   const items = ((await response.json()) as { items?: CatalogEntry[] }).items ?? [];
+
+  // If the catalog ever fills the requested limit exactly, we are looking at a page again and the
+  // ranking below is unreliable. Say so rather than printing a confident number.
+  if (items.length >= CATALOG_LIMIT) {
+    info(
+      style.yellow(
+        `WARNING: catalog returned ${items.length} entries, the full requested limit — there may be more, and this ranking may be truncated.`,
+      ),
+    );
+  }
 
   // The filter reads the tag from the payment requirement, not from the route's `tags` array.
   // Those are two different fields and only this one enters the competition.
   const tagged = items.filter((i) => i.accepts?.[0]?.extra?.["tag"] === CHALLENGE_TAG);
   const ranked = [...tagged].sort((a, b) => b.settleCount - a.settleCount);
 
-  heading(`challenge leaderboard — ${tagged.length} tagged entries`);
+  heading(`challenge leaderboard — ${tagged.length} tagged of ${items.length} catalog entries`);
   for (const [index, entry] of ranked.slice(0, top).entries()) {
     const ours = entry.resourceUrl.includes(match);
     const line = `${String(index + 1).padStart(3)}. ${String(entry.settleCount).padStart(5)}  ${entry.resourceUrl.slice(0, 52)}`;
     info(ours ? style.green(`${line}   <-- us`) : line);
+  }
+
+  // Untagged resources of ours are worth surfacing: they may be earning settlements that do not
+  // count. The alias path exists precisely because the catalog freezes `accepts` on a resource it
+  // has already indexed, so the original path can carry settles the leaderboard ignores.
+  const untagged = items.filter(
+    (i) =>
+      i.resourceUrl.includes(match) &&
+      i.accepts?.[0]?.extra?.["tag"] !== CHALLENGE_TAG &&
+      i.settleCount > 0,
+  );
+  for (const entry of untagged) {
+    info(
+      style.yellow(
+        `\nUNTAGGED: ${entry.resourceUrl} has ${entry.settleCount} settles that do NOT count`,
+      ),
+    );
   }
 
   const mine = ranked.filter((i) => i.resourceUrl.includes(match));
