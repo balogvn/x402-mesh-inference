@@ -100,12 +100,20 @@ kill_timeout = "35s"
   internal_port = 8402
   force_https = true
 
-  # Keep one machine warm. Fly's cold start is quick, but a judge or an autonomous agent
-  # hitting a stopped machine sees a delay on the very first request, which is exactly the
-  # request that matters most here. Drop to auto_stop_machines = true if cost matters more.
-  auto_stop_machines = false
+  # Auto-stop, now that the challenge measurement window has closed.
+  #
+  # This was `false` with a deliberate reason: a judge or an autonomous agent hitting a stopped
+  # machine sees a cold start on the very first request, which was the request that mattered
+  # most. That reason expired with the leaderboard, and a warm machine serving no traffic is
+  # simply rent.
+  #
+  # Safe here specifically because accruals are durable in Redis and `recoverAccruals()` runs
+  # before the listener accepts traffic. A stop triggers SIGTERM, the shutdown handler flushes
+  # what is owed, and `kill_timeout = 35s` is long enough for it — that setting is what makes
+  # auto-stop safe rather than a way to lose money on every idle period.
+  auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 1
+  min_machines_running = 0
   processes = ["app"]
 
   [http_service.concurrency]
