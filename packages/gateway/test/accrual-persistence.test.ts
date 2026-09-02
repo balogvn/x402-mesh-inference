@@ -3,7 +3,7 @@ import type { AccrualStore, PersistedAccrual } from "@x402-mesh/registry";
 import { createAccrualStore } from "@x402-mesh/registry";
 import { computeSplit, loadGatewayConfig } from "@x402-mesh/shared";
 import { silentLogger } from "../src/logger.js";
-import { DoubleSettlementService } from "../src/services/settlement.js";
+import { DoubleSettlementService } from "@x402-mesh/settlement";
 import { makeClock, makeConfig, makeOperator, StubPayer, TEST_PAY_TO } from "./helpers.js";
 import type { PayoutRequest } from "../src/ports.js";
 

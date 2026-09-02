@@ -54,8 +54,8 @@ export {
 export { NonceCache } from "./services/nonceCache.js";
 export { RegistrySelectorAdapter, RegistryStoreAdapter } from "./services/registryAdapter.js";
 export { HttpNodeRouter } from "./services/router.js";
-export { DEFAULT_RETRY_POLICY, DoubleSettlementService } from "./services/settlement.js";
-export type { RetryPolicy, SettlementDeps } from "./services/settlement.js";
+export { DEFAULT_RETRY_POLICY, DoubleSettlementService } from "@x402-mesh/settlement";
+export type { RetryPolicy, SettlementDeps } from "@x402-mesh/settlement";
 
 export { initTelemetry, withSpan } from "./telemetry/otel.js";
 

@@ -7,7 +7,7 @@ import { attachSettlementHook, createApp } from "../src/app.js";
 import { silentLogger } from "../src/logger.js";
 import { errorHandler } from "../src/middleware/errorHandler.js";
 import { rateLimit, rateLimitKey } from "../src/middleware/rateLimit.js";
-import { DoubleSettlementService } from "../src/services/settlement.js";
+import { DoubleSettlementService } from "@x402-mesh/settlement";
 import {
   makeConfig,
   makeNodeRecord,

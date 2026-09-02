@@ -27,7 +27,7 @@ import { createHealthRouter } from "./routes/health.js";
 import { createNodeRouter } from "./routes/nodes.js";
 import { createQuickstartRouter } from "./routes/quickstart.js";
 import { HttpNodeRouter } from "./services/router.js";
-import { parseInboundAmount } from "./services/settlement.js";
+import { parseInboundAmount } from "@x402-mesh/settlement";
 import { buildRoutesConfig, PAID_ROUTE_PATHS } from "./x402/routes.js";
 
 /**
