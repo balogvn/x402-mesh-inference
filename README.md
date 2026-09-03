@@ -1,4 +1,4 @@
-# x402 Mesh Inference
+# x402 Mesh
 
 **Settlement infrastructure for pay-per-use APIs, with an AI inference marketplace on top.**
 
@@ -6,8 +6,10 @@ The hard part here is not serving a model — that is a commodity. It is splitti
 between a platform and a supplier, on-chain, where neither holds an account with the other, and
 amortizing the transaction fee so the split is economically possible at all. A flat per-payout
 fee is the structural reason micropayment marketplaces do not exist: below a certain size, paying
-your supplier costs more than the payment is worth. The 1,795 lines that solve that make no
-mention of inference. See [docs/positioning.md](docs/positioning.md).
+your supplier costs more than the payment is worth. The code that solves that makes no mention of
+inference — it lives in [`packages/settlement`](packages/settlement), depends on no web server and
+no chain client, and is the part of this repository worth reading first. See
+[docs/positioning.md](docs/positioning.md) for the argument in full.
 
 The demo on top is a marketplace: independent GPU operators register their hardware with a
 gateway, an autonomous agent calls an ordinary OpenAI-compatible `POST /v1/chat/completions`
@@ -749,11 +751,13 @@ and by the deploy workflow against the **served** manifest of a live deployment.
 
 ```text
 packages/
+  settlement/   the payment split and the payout-fee amortization, behind ports —
+                no HTTP, no chain client, no inference. Start here.
   shared/       money (bigint atomic units), pricing split, zod schemas, canonical
                 signing, CAIP-2 network normalization, config loaders, error taxonomy
   registry/     node store (in-memory + Redis) and the scale-invariant node selector
   gateway/      Express app: x402 paywall, node lifecycle, routing, SSE relay,
-                double settlement, discovery, health, telemetry
+                discovery, health, telemetry — settlement now arrives as a dependency
   node-daemon/  the `x402-mesh-node` CLI operators run: register, start, doctor, address
 spec/           openapi.yaml, well-known-x402.json, llms.txt  (contract artefacts)
 scripts/        keygen, preflight, validate-spec, e2e-simulate, e2e-mainnet

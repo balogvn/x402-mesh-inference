@@ -1,5 +1,5 @@
 {
-  "name": "x402-mesh-inference",
+  "name": "x402-mesh",
   "version": "0.1.0",
   "private": true,
   "description": "Decentralized pay-per-prompt AI compute routing marketplace on Algorand x402",

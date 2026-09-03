@@ -1,4 +1,4 @@
-# x402 Mesh Inference — one-command local demo.
+# x402 Mesh — one-command local demo.
 #
 #   cp .env.example .env          # then edit at minimum X402_PAY_TO_ADDRESS and AVM_PRIVATE_KEY
 #   docker compose -f docker/docker-compose.yml up --build
