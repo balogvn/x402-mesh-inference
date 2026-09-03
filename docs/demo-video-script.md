@@ -1,4 +1,4 @@
-# Demo video script — x402 Mesh Inference
+# Demo video script — x402 Mesh
 
 Target **3:00**. Terminal + browser, no slides. Every command below was run against the live
 MainNet deployment before this script was written; the output shown is what it actually returns.
