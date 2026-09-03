@@ -10,7 +10,10 @@ and a supplier who hold no account with each other, and amortizing the transacti
 split is possible at all. Every failure below is a failure of _that_, not of serving a model —
 which is why they generalise to anything paying many suppliers a little at a time.
 
-It works. It settles on MainNet. It leads the x402 Global Challenge leaderboard.
+It works. It settles on MainNet. It was, briefly, top of the x402 Global Challenge
+leaderboard — as of 3 September 2026 it is rank 64 of 1,479 tagged entries, with 17 settles
+against a leader on 236,998. That ranking measures traffic volume, which is not what any of
+this was built to be good at.
 
 None of that is the interesting part. The interesting part is that across fifteen commits in two
 days, **the test suite was green for every single bug below**. Not one of them was caught by the
