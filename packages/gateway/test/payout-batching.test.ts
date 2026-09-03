@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { computeSplit } from "@x402-mesh/shared";
 import { silentLogger } from "../src/logger.js";
-import { DoubleSettlementService } from "../src/services/settlement.js";
+import { DoubleSettlementService } from "@x402-mesh/settlement";
 import { makeClock, makeConfig, makeOperator, StubPayer } from "./helpers.js";
 
 /**

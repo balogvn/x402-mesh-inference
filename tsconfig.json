@@ -3,6 +3,7 @@
   "references": [
     { "path": "./packages/shared" },
     { "path": "./packages/registry" },
+    { "path": "./packages/settlement" },
     { "path": "./packages/gateway" },
     { "path": "./packages/node-daemon" }
   ]

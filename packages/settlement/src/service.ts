@@ -1,4 +1,4 @@
-import type { Atomic, GatewayConfig, SettlementRecord } from "@x402-mesh/shared";
+import type { Atomic, SettlementRecord } from "@x402-mesh/shared";
 import {
   assertSplitInvariant,
   atomicToWire,
@@ -8,16 +8,18 @@ import {
   SettlementError,
 } from "@x402-mesh/shared";
 import type { AccrualStore, LedgerStore, PersistedAccrual } from "@x402-mesh/registry";
-import type { Logger } from "../logger.js";
+
+import type { SettlementConfig } from "./config.js";
 import type {
   Clock,
   InboundSettlement,
+  Logger,
   PendingPayout,
   SettlementServicePort,
   Sleep,
   UsdcPayoutPort,
-} from "../ports.js";
-import { withSpan } from "../telemetry/otel.js";
+  WithSpan,
+} from "./ports.js";
 
 /**
  * The double-settlement orchestrator.
@@ -78,7 +80,7 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
 
 /** Collaborators {@link DoubleSettlementService} needs. */
 export interface SettlementDeps {
-  config: GatewayConfig;
+  config: SettlementConfig;
   payer: UsdcPayoutPort;
   logger: Logger;
   /** Time source in milliseconds. */
@@ -88,6 +90,8 @@ export interface SettlementDeps {
   /** Jitter source in [0, 1); injected so retry timing is deterministic under test. */
   random?: () => number;
   retry?: RetryPolicy;
+  /** Tracing hook. Defaults to a pass-through, so tracing is optional. */
+  withSpan?: WithSpan;
   /** Maximum ledger entries retained in memory. */
   maxLedgerEntries?: number;
   /**
@@ -192,11 +196,12 @@ const DEFAULT_MAX_LEDGER_ENTRIES = 1_000;
 const ROUTING_NOTE_TTL_MS = 10 * 60_000;
 
 export class DoubleSettlementService implements SettlementServicePort {
-  private readonly config: GatewayConfig;
+  private readonly config: SettlementConfig;
   private readonly payer: UsdcPayoutPort;
   private readonly logger: Logger;
   private readonly now: Clock;
   private readonly sleep: Sleep;
+  private readonly withSpan: WithSpan;
   private readonly random: () => number;
   private readonly retry: RetryPolicy;
   private readonly maxLedgerEntries: number;
@@ -272,6 +277,13 @@ export class DoubleSettlementService implements SettlementServicePort {
     this.logger = deps.logger;
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    /*
+      Tracing is injected rather than imported, because the span helper belongs to
+      the host's telemetry setup and this package must not reach into it. The
+      default is a pass-through, so a caller that does not trace pays nothing and
+      every existing test constructs the service unchanged.
+    */
+    this.withSpan = deps.withSpan ?? ((_name, fn) => fn());
     this.random = deps.random ?? Math.random;
     this.retry = deps.retry ?? DEFAULT_RETRY_POLICY;
     this.maxLedgerEntries = deps.maxLedgerEntries ?? DEFAULT_MAX_LEDGER_ENTRIES;
@@ -891,7 +903,7 @@ export class DoubleSettlementService implements SettlementServicePort {
     let lastError = "unknown error";
     for (let attempt = 1; attempt <= this.retry.attempts; attempt += 1) {
       try {
-        const { txId } = await withSpan(
+        const { txId } = await this.withSpan(
           "gateway.payout",
           () =>
             this.payer.pay({

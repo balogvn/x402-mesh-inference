@@ -4,7 +4,7 @@ import type { x402ResourceServer } from "@x402/core/server";
 import { attachSettlementHook } from "../src/app.js";
 import { silentLogger } from "../src/logger.js";
 import type { Logger } from "../src/logger.js";
-import { DEFAULT_RETRY_POLICY, DoubleSettlementService } from "../src/services/settlement.js";
+import { DEFAULT_RETRY_POLICY, DoubleSettlementService } from "@x402-mesh/settlement";
 import { makeClock, makeConfig, makeNodeRecord, StubPayer, StubSettlement } from "./helpers.js";
 
 /**

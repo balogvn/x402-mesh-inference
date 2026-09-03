@@ -21,7 +21,7 @@ import {
   readAlgodOverrides,
 } from "./services/algorand.js";
 import { RegistrySelectorAdapter, RegistryStoreAdapter } from "./services/registryAdapter.js";
-import { DoubleSettlementService } from "./services/settlement.js";
+import { DoubleSettlementService } from "@x402-mesh/settlement";
 import { initTelemetry } from "./telemetry/otel.js";
 import { buildResourceServer } from "./x402/server.js";
 
